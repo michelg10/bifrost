@@ -2,9 +2,11 @@ package semanticcache
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"maps"
+	"math"
 	"strings"
 	"time"
 
@@ -39,21 +41,24 @@ func toFloat32Embedding(values []float64) []float32 {
 	return embedding
 }
 
-func flattenToFloat32Embedding(values [][]float64) []float32 {
-	total := 0
-	for _, arr := range values {
-		total += len(arr)
+// decodeBase64Embedding decodes a base64-encoded embedding of raw IEEE 754 float32 bytes (little-endian).
+func decodeBase64Embedding(s string) ([]float32, error) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		b, err = base64.URLEncoding.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("base64 decode failed: %w", err)
+		}
 	}
-	if total == 0 {
-		return nil
+	if len(b)%4 != 0 {
+		return nil, fmt.Errorf("base64 embedding byte length %d is not a multiple of 4", len(b))
 	}
-
-	embedding := make([]float32, 0, total)
-	for _, arr := range values {
-		embedding = append(embedding, toFloat32Embedding(arr)...)
+	vals := make([]float32, len(b)/4)
+	for i := range vals {
+		bits := binary.LittleEndian.Uint32(b[i*4 : i*4+4])
+		vals[i] = math.Float32frombits(bits)
 	}
-
-	return embedding
+	return vals, nil
 }
 
 // generateEmbedding generates an embedding for the given text using the configured provider.
@@ -62,9 +67,7 @@ func (plugin *Plugin) generateEmbedding(ctx *schemas.BifrostContext, text string
 	embeddingReq := &schemas.BifrostEmbeddingRequest{
 		Provider: plugin.config.Provider,
 		Model:    plugin.config.EmbeddingModel,
-		Input: &schemas.EmbeddingInput{
-			Text: &text,
-		},
+		Input: []schemas.EmbeddingContent{{{Type: schemas.EmbeddingContentPartTypeText, Text: &text}}},
 	}
 
 	// Create a new context from incoming context. Parent ctx will be used for cancellation.
@@ -93,17 +96,14 @@ func (plugin *Plugin) generateEmbedding(ctx *schemas.BifrostContext, text string
 		inputTokens = response.Usage.TotalTokens
 	}
 
-	if embedding.EmbeddingStr != nil {
-		// decode embedding.EmbeddingStr to []float32
-		var vals []float32
-		if err := json.Unmarshal([]byte(*embedding.EmbeddingStr), &vals); err != nil {
-			return nil, 0, fmt.Errorf("failed to parse string embedding: %w", err)
+	if len(embedding.Float) > 0 {
+		return toFloat32Embedding(embedding.Float), inputTokens, nil
+	} else if embedding.Base64 != nil {
+		vals, err := decodeBase64Embedding(*embedding.Base64)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to decode base64 embedding: %w", err)
 		}
 		return vals, inputTokens, nil
-	} else if embedding.EmbeddingArray != nil {
-		return toFloat32Embedding(embedding.EmbeddingArray), inputTokens, nil
-	} else if len(embedding.Embedding2DArray) > 0 {
-		return flattenToFloat32Embedding(embedding.Embedding2DArray), inputTokens, nil
 	}
 
 	return nil, 0, fmt.Errorf("embedding data is not in expected format")
@@ -438,18 +438,16 @@ func (plugin *Plugin) extractTextForEmbedding(req *schemas.BifrostRequest) (stri
 			return "", "", fmt.Errorf("failed to marshal metadata for metadata hash: %w", err)
 		}
 
-		texts := req.EmbeddingRequest.Input.Texts
-
-		if len(texts) == 0 && req.EmbeddingRequest.Input.Text != nil {
-			texts = []string{*req.EmbeddingRequest.Input.Text}
+		var textParts []string
+		for _, content := range req.EmbeddingRequest.Input {
+			for _, part := range content {
+				if part.Type == schemas.EmbeddingContentPartTypeText && part.Text != nil {
+					textParts = append(textParts, normalizeText(*part.Text))
+				}
+			}
 		}
 
-		var text string
-		for _, t := range texts {
-			text += t + " "
-		}
-
-		return strings.TrimSpace(text), metadataHash, nil
+		return strings.Join(textParts, " "), metadataHash, nil
 
 	case req.TranscriptionRequest != nil:
 		// Skip semantic caching for transcription requests
@@ -757,35 +755,22 @@ func (plugin *Plugin) getNormalizedInputForCaching(req *schemas.BifrostRequest) 
 	case schemas.SpeechRequest, schemas.SpeechStreamRequest:
 		return normalizeText(req.SpeechRequest.Input.Input)
 	case schemas.EmbeddingRequest:
-		// Create a deep copy of the input to avoid mutating the original request
-		copiedInput := schemas.EmbeddingInput{}
-		if req.EmbeddingRequest.Input.Text != nil {
-			copiedText := *req.EmbeddingRequest.Input.Text
-			copiedInput.Text = &copiedText
-		} else if len(req.EmbeddingRequest.Input.Texts) > 0 {
-			copiedTexts := make([]string, len(req.EmbeddingRequest.Input.Texts))
-			copy(copiedTexts, req.EmbeddingRequest.Input.Texts)
-			copiedInput.Texts = copiedTexts
-		} else if req.EmbeddingRequest.Input.Embedding != nil {
-			copiedEmbedding := make([]int, len(req.EmbeddingRequest.Input.Embedding))
-			copy(copiedEmbedding, req.EmbeddingRequest.Input.Embedding)
-			copiedInput.Embedding = copiedEmbedding
-		} else if req.EmbeddingRequest.Input.Embeddings != nil {
-			copiedEmbeddings := make([][]int, len(req.EmbeddingRequest.Input.Embeddings))
-			copy(copiedEmbeddings, req.EmbeddingRequest.Input.Embeddings)
-			copiedInput.Embeddings = copiedEmbeddings
-		}
-		if copiedInput.Text != nil {
-			normalizedText := normalizeText(*copiedInput.Text)
-			copiedInput.Text = &normalizedText
-		} else if len(copiedInput.Texts) > 0 {
-			normalizedTexts := make([]string, len(copiedInput.Texts))
-			for i, text := range copiedInput.Texts {
-				normalizedTexts[i] = normalizeText(text)
+		// Deep copy Contents and normalize all text parts.
+		src := req.EmbeddingRequest.Input
+		copiedContents := make([]schemas.EmbeddingContent, len(src))
+		for i, content := range src {
+			copiedContent := make(schemas.EmbeddingContent, len(content))
+			for j, part := range content {
+				copied := part
+				if part.Type == schemas.EmbeddingContentPartTypeText && part.Text != nil {
+					normalized := normalizeText(*part.Text)
+					copied.Text = &normalized
+				}
+				copiedContent[j] = copied
 			}
-			copiedInput.Texts = normalizedTexts
+			copiedContents[i] = copiedContent
 		}
-		return copiedInput
+		return copiedContents
 	case schemas.TranscriptionRequest, schemas.TranscriptionStreamRequest:
 		return req.TranscriptionRequest.Input
 	case schemas.ImageGenerationRequest, schemas.ImageGenerationStreamRequest:

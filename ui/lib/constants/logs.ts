@@ -41,6 +41,7 @@ export const RequestTypes = [
 	"responses",
 	"responses_stream",
 	"embedding",
+	"batch_embedding",
 	"rerank",
 	"speech",
 	"speech_stream",
@@ -153,6 +154,7 @@ export const RequestTypeLabels = {
 	responses_stream: "Responses Stream",
 
 	embedding: "Embedding",
+	batch_embedding: "Batch Embedding",
 	rerank: "Rerank",
 
 	speech: "Speech",
@@ -235,6 +237,7 @@ export const RequestTypeColors = {
 	responses_stream: "bg-violet-100 text-violet-800",
 
 	embedding: "bg-red-100 text-red-800",
+	batch_embedding: "bg-red-100 text-red-800",
 	rerank: "bg-fuchsia-100 text-fuchsia-800",
 
 	speech: "bg-purple-100 text-purple-800",
