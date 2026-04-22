@@ -31,9 +31,9 @@ import {
 import { validateRateLimitAndBudgetRules, validateRoutingRules } from "@/lib/utils/celConverterRouting";
 import { normalizeRoutingRuleGroupQuery } from "@/lib/utils/routingRuleGroupQuery";
 import { Plus, Save, Trash2, X } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
-import { RuleGroupType } from "react-querybuilder";
+import { RuleGroupType, RuleType } from "react-querybuilder";
 import { toast } from "sonner";
 
 interface RoutingRuleDialogProps {
