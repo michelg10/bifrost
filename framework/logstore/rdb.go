@@ -74,8 +74,64 @@ func generateBucketTimestamps(startTime, endTime *time.Time, bucketSizeSeconds i
 	return timestamps
 }
 
+// applyVisibility narrows a logs query to rows the caller is allowed to see,
+// based on the *VisibilityFilter stashed on the gorm statement context.
+//
+// Mapping is OR-joined across the dimensions present on the filter:
+//
+//   - UserIDs       → logs.user_id IN (...)
+//   - TeamIDs       → logs.team_id IN (...)
+//   - VirtualKeyIDs → logs.virtual_key_id IN (...)
+//
+// A nil filter or an unrestricted one leaves the query unchanged. An empty
+// slice on a dimension contributes "1 = 0" for that dimension, matching the
+// VisibilityFilter contract.
+func (s *RDBLogStore) applyVisibility(baseQuery *gorm.DB) *gorm.DB {
+	ctx := baseQuery.Statement.Context
+	if ctx == nil {
+		return baseQuery
+	}
+	f := schemas.FilterForEntity(ctx, schemas.EntityLog)
+	if f.IsUnrestricted() {
+		return baseQuery
+	}
+	var (
+		clauses []string
+		args    []any
+	)
+	if f.UserIDs != nil {
+		if ids := *f.UserIDs; len(ids) == 0 {
+			clauses = append(clauses, "1 = 0")
+		} else {
+			clauses = append(clauses, "user_id IN ?")
+			args = append(args, ids)
+		}
+	}
+	if f.TeamIDs != nil {
+		if ids := *f.TeamIDs; len(ids) == 0 {
+			clauses = append(clauses, "1 = 0")
+		} else {
+			clauses = append(clauses, "team_id IN ?")
+			args = append(args, ids)
+		}
+	}
+	if f.VirtualKeyIDs != nil {
+		if ids := *f.VirtualKeyIDs; len(ids) == 0 {
+			clauses = append(clauses, "1 = 0")
+		} else {
+			clauses = append(clauses, "virtual_key_id IN ?")
+			args = append(args, ids)
+		}
+	}
+	if len(clauses) == 0 {
+		return baseQuery
+	}
+	return baseQuery.Where("("+strings.Join(clauses, " OR ")+")", args...)
+}
+
 // applyFilters applies search filters to a GORM query
 func (s *RDBLogStore) applyFilters(baseQuery *gorm.DB, filters SearchFilters) *gorm.DB {
+	baseQuery = s.applyVisibility(baseQuery)
 	if len(filters.Providers) > 0 {
 		baseQuery = baseQuery.Where("provider IN ?", filters.Providers)
 	}
@@ -487,7 +543,7 @@ func (s *RDBLogStore) GetSessionLogs(ctx context.Context, sessionID string, pagi
 	}
 	orderClause := "timestamp " + orderDir + ", id " + orderDir
 
-	baseQuery := s.db.WithContext(ctx).Model(&Log{}).Where("parent_request_id = ?", sessionID)
+	baseQuery := s.applyVisibility(s.db.WithContext(ctx).Model(&Log{})).Where("parent_request_id = ?", sessionID)
 
 	var (
 		totalCount int64
@@ -497,7 +553,7 @@ func (s *RDBLogStore) GetSessionLogs(ctx context.Context, sessionID string, pagi
 	g, gCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		return s.db.WithContext(gCtx).Model(&Log{}).Where("parent_request_id = ?", sessionID).Count(&totalCount).Error
+		return s.applyVisibility(s.db.WithContext(gCtx).Model(&Log{})).Where("parent_request_id = ?", sessionID).Count(&totalCount).Error
 	})
 
 	g.Go(func() error {
@@ -550,8 +606,7 @@ func (s *RDBLogStore) GetSessionSummary(ctx context.Context, sessionID string) (
 
 	// Single aggregate select keeps Count/SUM/MIN/MAX consistent against the same row snapshot
 	// and halves the round trips compared to running Count and the aggregate row in parallel.
-	row := s.db.WithContext(ctx).
-		Model(&Log{}).
+	row := s.applyVisibility(s.db.WithContext(ctx).Model(&Log{})).
 		Where("parent_request_id = ?", sessionID).
 		Select("COUNT(*) AS count, COALESCE(SUM(cost), 0) AS total_cost, COALESCE(SUM(total_tokens), 0) AS total_tokens, MIN(timestamp) AS started_at, MAX(timestamp) AS latest_at").
 		Row()
@@ -2720,7 +2775,7 @@ func (s *RDBLogStore) GetDistinctModels(ctx context.Context) ([]string, error) {
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFilterDataCutoffDays)
 	var models []string
-	err := s.db.WithContext(ctx).Model(&Log{}).
+	err := s.applyVisibility(s.db.WithContext(ctx).Model(&Log{})).
 		Where("model IS NOT NULL AND model != '' AND timestamp >= ?", cutoff).
 		Distinct("model").Limit(defaultFilterDataLimit).Pluck("model", &models).Error
 	if err != nil {
@@ -2734,7 +2789,7 @@ func (s *RDBLogStore) GetDistinctModels(ctx context.Context) ([]string, error) {
 func (s *RDBLogStore) GetDistinctAliases(ctx context.Context) ([]string, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFilterDataCutoffDays)
 	var aliases []string
-	err := s.db.WithContext(ctx).Model(&Log{}).
+	err := s.applyVisibility(s.db.WithContext(ctx).Model(&Log{})).
 		Where("alias IS NOT NULL AND alias != '' AND timestamp >= ?", cutoff).
 		Distinct("alias").Limit(defaultFilterDataLimit).Pluck("alias", &aliases).Error
 	if err != nil {
@@ -2775,7 +2830,7 @@ func (s *RDBLogStore) GetDistinctKeyPairs(ctx context.Context, idCol, nameCol st
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFilterDataCutoffDays)
 	var results []KeyPairResult
-	err := s.db.WithContext(ctx).Model(&Log{}).
+	err := s.applyVisibility(s.db.WithContext(ctx).Model(&Log{})).
 		Select(fmt.Sprintf("DISTINCT %s as id, %s as name", idCol, nameCol)).
 		Where(fmt.Sprintf("%s IS NOT NULL AND %s != '' AND %s IS NOT NULL AND %s != '' AND timestamp >= ?", idCol, idCol, nameCol, nameCol), cutoff).
 		Limit(defaultFilterDataLimit).
@@ -2794,7 +2849,7 @@ func (s *RDBLogStore) GetDistinctRoutingEngines(ctx context.Context) ([]string, 
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFilterDataCutoffDays)
 	var rawValues []string
-	err := s.db.WithContext(ctx).Model(&Log{}).
+	err := s.applyVisibility(s.db.WithContext(ctx).Model(&Log{})).
 		Where("routing_engines_used IS NOT NULL AND routing_engines_used != '' AND timestamp >= ?", cutoff).
 		Distinct("routing_engines_used").Limit(defaultFilterDataLimit).Pluck("routing_engines_used", &rawValues).Error
 	if err != nil {
@@ -2822,7 +2877,7 @@ func (s *RDBLogStore) GetDistinctRoutingEngines(ctx context.Context) ([]string, 
 func (s *RDBLogStore) GetDistinctStopReasons(ctx context.Context) ([]string, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFilterDataCutoffDays)
 	var stopReasons []string
-	err := s.db.WithContext(ctx).Model(&Log{}).
+	err := s.applyVisibility(s.db.WithContext(ctx).Model(&Log{})).
 		Where("stop_reason IS NOT NULL AND stop_reason != '' AND timestamp >= ?", cutoff).
 		Distinct("stop_reason").Limit(defaultFilterDataLimit).Pluck("stop_reason", &stopReasons).Error
 	if err != nil {
@@ -2855,7 +2910,7 @@ func (s *RDBLogStore) GetDistinctMetadataKeys(ctx context.Context) (map[string][
 	} else {
 		metadataGuard = "metadata IS NOT NULL AND json_valid(metadata) AND json_type(metadata) = 'object' AND metadata != '{}' AND timestamp >= ?"
 	}
-	err := s.db.WithContext(ctx).Model(&Log{}).
+	err := s.applyVisibility(s.db.WithContext(ctx).Model(&Log{})).
 		Where(metadataGuard, cutoff).
 		Order("timestamp DESC").
 		Limit(maxMetadataRows).
