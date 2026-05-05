@@ -911,6 +911,22 @@ func (bifrost *Bifrost) ResponsesStreamRequest(ctx *schemas.BifrostContext, req 
 	return bifrost.handleStreamRequest(ctx, bifrostReq)
 }
 
+func addOpenAICountTokensFallbackForAzure(req *schemas.BifrostResponsesRequest) {
+	if req == nil || req.Provider != schemas.Azure || len(req.Fallbacks) > 0 {
+		return
+	}
+
+	// Azure does not expose a documented Responses input-token counting endpoint.
+	// Claude Code still calls Anthropic count_tokens; route just this operation to
+	// OpenAI's /responses/input_tokens as a pragmatic estimate while leaving normal
+	// Azure generation routing untouched.
+	req.Fallbacks = []schemas.Fallback{{Provider: schemas.OpenAI, Model: openAICountTokensFallbackModel(req.Model)}}
+}
+
+func openAICountTokensFallbackModel(model string) string {
+	return strings.TrimSuffix(model, "-cc")
+}
+
 // CountTokensRequest sends a count tokens request to the specified provider.
 func (bifrost *Bifrost) CountTokensRequest(ctx *schemas.BifrostContext, req *schemas.BifrostResponsesRequest) (*schemas.BifrostCountTokensResponse, *schemas.BifrostError) {
 	if req == nil {
@@ -938,6 +954,8 @@ func (bifrost *Bifrost) CountTokensRequest(ctx *schemas.BifrostContext, req *sch
 			},
 		}
 	}
+
+	addOpenAICountTokensFallbackForAzure(req)
 
 	bifrostReq := bifrost.getBifrostRequest()
 	bifrostReq.RequestType = schemas.CountTokensRequest
