@@ -170,9 +170,9 @@ dev: install-ui install-air setup-workspace $(if $(DEBUG),install-delve) ## Star
 	$(ECHO) "$(YELLOW)Starting UI development server...$(NC)"; \
 	$(USE_NODE); if [ -n "$(DISABLE_PROFILER)" ]; then \
 		$(ECHO) "$(CYAN)DevProfiler disabled for testing$(NC)"; \
-		cd ui && BIFROST_DISABLE_PROFILER=1 npm run dev & \
+		(cd ui && BIFROST_DISABLE_PROFILER=1 npm run dev) & \
 	else \
-		cd ui && npm run dev & \
+		(cd ui && npm run dev) & \
 	fi; \
 	sleep 3; \
 	$(ECHO) "$(YELLOW)Starting API server with UI proxy...$(NC)"; \
@@ -216,9 +216,9 @@ dev-pulse: install-ui install-pulse setup-workspace $(if $(DEBUG),install-delve)
 	$(ECHO) "$(YELLOW)Starting UI development server...$(NC)"; \
 	$(USE_NODE); if [ -n "$(DISABLE_PROFILER)" ]; then \
 		$(ECHO) "$(CYAN)DevProfiler disabled for testing$(NC)"; \
-		cd ui && BIFROST_DISABLE_PROFILER=1 npm run dev & \
+		(cd ui && BIFROST_DISABLE_PROFILER=1 npm run dev) & \
 	else \
-		cd ui && npm run dev & \
+		(cd ui && npm run dev) & \
 	fi; \
 	sleep 3; \
 	$(ECHO) "$(YELLOW)Starting API server with UI proxy...$(NC)"; \
