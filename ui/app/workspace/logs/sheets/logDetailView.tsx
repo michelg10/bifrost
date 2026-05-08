@@ -655,6 +655,7 @@ export function LogDetailView({
   const isContainer = isContainerOperation(log.object);
   const showTabs = !isContainer;
   const isPassthrough = isPassthroughOperation(log.object);
+  const isRealtimeTurn = log.object === 'realtime.turn';
   const passthroughParams = isPassthrough
     ? (log.params as {
       method?: string;
@@ -821,6 +822,27 @@ export function LogDetailView({
                     Large Payload
                   </Badge>
                 )}
+              {isRealtimeTurn && log.metadata?.realtime_transport && (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "rounded-sm px-2 py-0.5 font-medium",
+                    log.metadata.realtime_transport === 'websocket'
+                      ? 'border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-600 dark:bg-indigo-950 dark:text-indigo-300'
+                      : 'border-purple-300 bg-purple-50 text-purple-700 dark:border-purple-600 dark:bg-purple-950 dark:text-purple-300'
+                  )}
+                >
+                  {log.metadata.realtime_transport === 'websocket' ? 'WebSocket' : 'WebRTC'}
+                </Badge>
+              )}
+              {isRealtimeTurn && log.metadata?.realtime_voice && (
+                <Badge
+                  variant="outline"
+                  className="rounded-sm border-amber-300 bg-amber-50 px-2 py-0.5 font-medium text-amber-700 dark:border-amber-600 dark:bg-amber-950 dark:text-amber-300"
+                >
+                  {log.metadata.realtime_voice}
+                </Badge>
+              )}
             </div>
             <div className="mt-3 flex items-center gap-2">
               <div className="text-muted-foreground text-[10.5px] font-semibold tracking-wider uppercase">
@@ -916,15 +938,27 @@ export function LogDetailView({
             }
             hasRightBorder
           />
-          <HeroStat
-            label="Tools available"
-            value={(log.params?.tools?.length ?? 0).toString()}
-            sub={
-              (log.params as any)?.tool_choice != null
-                ? `choice: ${formatToolChoice((log.params as any).tool_choice)}`
-                : ""
-            }
-          />
+          {isRealtimeTurn ? (
+            <HeroStat
+              label="Voice"
+              value={log.metadata?.realtime_voice ? String(log.metadata.realtime_voice) : "\u2014"}
+              sub={
+                log.metadata?.realtime_transport
+                  ? (log.metadata.realtime_transport === 'websocket' ? 'WebSocket' : 'WebRTC')
+                  : ""
+              }
+            />
+          ) : (
+            <HeroStat
+              label="Tools available"
+              value={(log.params?.tools?.length ?? 0).toString()}
+              sub={
+                (log.params as any)?.tool_choice != null
+                  ? `choice: ${formatToolChoice((log.params as any).tool_choice)}`
+                  : ""
+              }
+            />
+          )}
         </div>
       </div>
       <details className="group bg-card rounded-sm border" open={false}>
@@ -1255,6 +1289,65 @@ export function LogDetailView({
                 </>
               )}
 
+              {isRealtimeTurn && (
+                <>
+                  {log.metadata?.realtime_session_id && (
+                    <LogEntryDetailsView
+                      className="w-full"
+                      label="Realtime Session"
+                      value={
+                        <span className="flex items-center gap-1">
+                          <code className="text-xs font-mono">{log.metadata.realtime_session_id}</code>
+                          <CopyInlineButton text={String(log.metadata.realtime_session_id)} />
+                        </span>
+                      }
+                    />
+                  )}
+                  {log.metadata?.provider_session_id && (
+                    <LogEntryDetailsView
+                      className="w-full"
+                      label="Provider Session"
+                      value={
+                        <span className="flex items-center gap-1">
+                          <code className="text-xs font-mono">{log.metadata.provider_session_id}</code>
+                          <CopyInlineButton text={String(log.metadata.provider_session_id)} />
+                        </span>
+                      }
+                    />
+                  )}
+                  {log.metadata?.realtime_transport && (
+                    <LogEntryDetailsView
+                      className="w-full"
+                      label="Transport"
+                      value={log.metadata.realtime_transport === 'websocket' ? 'WebSocket' : 'WebRTC'}
+                    />
+                  )}
+                  {log.metadata?.realtime_voice && (
+                    <LogEntryDetailsView
+                      className="w-full"
+                      label="Voice"
+                      value={String(log.metadata.realtime_voice)}
+                    />
+                  )}
+                  {log.metadata?.realtime_source && (
+                    <LogEntryDetailsView
+                      className="w-full"
+                      label="Turn Source"
+                      value={log.metadata.realtime_source === 'ei' ? 'Event Initiated' : 'Language Model'}
+                    />
+                  )}
+                  {log.metadata?.realtime_event_type && (
+                    <LogEntryDetailsView
+                      className="w-full"
+                      label="Trigger Event"
+                      value={
+                        <code className="text-xs font-mono">{log.metadata.realtime_event_type}</code>
+                      }
+                    />
+                  )}
+                </>
+              )}
+
               {passthroughParams && (
                 <>
                   {passthroughParams.method && (
@@ -1351,7 +1444,51 @@ export function LogDetailView({
                         : "-"
                     }
                   />
-                  {log.token_usage?.prompt_tokens_details && (
+                  {isRealtimeTurn && (
+                    <>
+                      <LogEntryDetailsView
+                        className="w-full"
+                        label="Input Text Tokens"
+                        value={
+                          (log.token_usage?.prompt_tokens ?? 0) -
+                          (log.token_usage?.prompt_tokens_details?.audio_tokens ?? 0)
+                        }
+                      />
+                      <LogEntryDetailsView
+                        className="w-full"
+                        label="Input Audio Tokens"
+                        value={
+                          log.token_usage?.prompt_tokens_details?.audio_tokens ?? 0
+                        }
+                      />
+                      <LogEntryDetailsView
+                        className="w-full"
+                        label="Output Text Tokens"
+                        value={
+                          (log.token_usage?.completion_tokens ?? 0) -
+                          (log.token_usage?.completion_tokens_details?.audio_tokens ?? 0) -
+                          (log.token_usage?.completion_tokens_details?.reasoning_tokens ?? 0)
+                        }
+                      />
+                      <LogEntryDetailsView
+                        className="w-full"
+                        label="Output Audio Tokens"
+                        value={
+                          log.token_usage?.completion_tokens_details?.audio_tokens ?? 0
+                        }
+                      />
+                      {(log.token_usage?.completion_tokens_details?.reasoning_tokens ?? 0) > 0 && (
+                        <LogEntryDetailsView
+                          className="w-full"
+                          label="Reasoning Tokens"
+                          value={
+                            log.token_usage?.completion_tokens_details?.reasoning_tokens ?? 0
+                          }
+                        />
+                      )}
+                    </>
+                  )}
+                  {!isRealtimeTurn && log.token_usage?.prompt_tokens_details && (
                     <>
                       {log.token_usage.prompt_tokens_details
                         .cached_read_tokens && (
@@ -1387,7 +1524,7 @@ export function LogDetailView({
                       )}
                     </>
                   )}
-                  {log.token_usage?.completion_tokens_details && (
+                  {!isRealtimeTurn && log.token_usage?.completion_tokens_details && (
                     <>
                       {log.token_usage.completion_tokens_details
                         .reasoning_tokens && (
@@ -1604,15 +1741,38 @@ export function LogDetailView({
                 </>
               )}
               {log.metadata &&
-                Object.keys(log.metadata).filter((k) => k !== "isAsyncRequest")
-                  .length > 0 && (
+                Object.keys(log.metadata).filter((k) => {
+                  if (k === "isAsyncRequest") return false;
+                  if (isRealtimeTurn && [
+                    'realtime_session_id',
+                    'provider_session_id',
+                    'realtime_source',
+                    'realtime_event_type',
+                    'realtime_transport',
+                    'realtime_voice',
+                    'realtime',
+                  ].includes(k)) return false;
+                  return true;
+                }).length > 0 && (
                   <>
                     <DottedSeparator />
                     <div className="space-y-4">
                       <BlockHeader title="Metadata" />
                       <div className="grid w-full grid-cols-3 items-start justify-between gap-4">
                         {Object.entries(log.metadata)
-                          .filter(([key]) => key !== "isAsyncRequest")
+                          .filter(([key]) => {
+                            if (key === "isAsyncRequest") return false;
+                            if (isRealtimeTurn && [
+                              'realtime_session_id',
+                              'provider_session_id',
+                              'realtime_source',
+                              'realtime_event_type',
+                              'realtime_transport',
+                              'realtime_voice',
+                              'realtime',
+                            ].includes(key)) return false;
+                            return true;
+                          })
                           .map(([key, value]) => (
                             <LogEntryDetailsView
                               key={key}
