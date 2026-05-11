@@ -158,6 +158,14 @@ func (e *EnvVar) Redacted() *EnvVar {
 	}
 }
 
+// MarshalJSON marshals the value to JSON as a plain string.
+func (e EnvVar) MarshalJSON() ([]byte, error) {
+	if e.FromEnv {
+		return sonic.Marshal(e.EnvVar)
+	}
+	return sonic.Marshal(e.Val)
+}
+
 // UnmarshalJSON unmarshals the value from JSON.
 func (e *EnvVar) UnmarshalJSON(data []byte) error {
 	// This is always going to be value
