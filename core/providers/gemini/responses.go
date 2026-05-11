@@ -71,9 +71,14 @@ func (request *GeminiGenerationRequest) ToBifrostResponsesRequest(ctx *schemas.B
 
 }
 
-func ToGeminiResponsesRequest(bifrostReq *schemas.BifrostResponsesRequest) (*GeminiGenerationRequest, error) {
+func ToGeminiResponsesRequest(bifrostReq *schemas.BifrostResponsesRequest, opts ...GeminiChatConvertOption) (*GeminiGenerationRequest, error) {
 	if bifrostReq == nil {
 		return nil, nil
+	}
+
+	var opt geminiChatConvertOptions
+	for _, f := range opts {
+		f(&opt)
 	}
 
 	bifrostReq.Model = NormalizeModelName(bifrostReq.Model)
@@ -93,7 +98,11 @@ func ToGeminiResponsesRequest(bifrostReq *schemas.BifrostResponsesRequest) (*Gem
 		geminiReq.ExtraParams = bifrostReq.Params.ExtraParams
 		// Handle tool-related parameters
 		if len(bifrostReq.Params.Tools) > 0 {
-			geminiReq.Tools = convertResponsesToolsToGemini(bifrostReq.Params.Tools)
+			var toolsErr error
+			geminiReq.Tools, toolsErr = convertResponsesToolsToGemini(bifrostReq.Params.Tools, opt.toolParametersAsJSONSchema)
+			if toolsErr != nil {
+				return nil, toolsErr
+			}
 
 			// Convert tool choice if present
 			if bifrostReq.Params.ToolChoice != nil {
@@ -2779,8 +2788,10 @@ func (r *GeminiGenerationRequest) convertParamsToGenerationConfigResponses(param
 	return config, nil
 }
 
-// convertResponsesToolsToGemini converts Responses tools to Gemini tools
-func convertResponsesToolsToGemini(tools []schemas.ResponsesTool) []Tool {
+// convertResponsesToolsToGemini converts Responses tools to Gemini tools.
+// When toolParametersAsJSONSchema is true, parameters are sent as parametersJsonSchema
+// (raw JSON Schema) instead of parameters (Gemini Schema). Mutually exclusive fields;
+func convertResponsesToolsToGemini(tools []schemas.ResponsesTool, toolParametersAsJSONSchema bool) ([]Tool, error) {
 	geminiTool := Tool{}
 
 	hasWebSearchTool := false
@@ -2806,12 +2817,17 @@ func convertResponsesToolsToGemini(tools []schemas.ResponsesTool) []Tool {
 							}
 							return ""
 						}(),
-						Parameters: func() *Schema {
-							if tool.ResponsesToolFunction.Parameters != nil {
-								return convertFunctionParametersToSchema(*tool.ResponsesToolFunction.Parameters)
+					}
+					if tool.ResponsesToolFunction.Parameters != nil {
+						if toolParametersAsJSONSchema {
+							raw, err := json.Marshal(tool.ResponsesToolFunction.Parameters)
+							if err != nil {
+								return nil, fmt.Errorf("marshal tool %q parameters: %w", *tool.Name, err)
 							}
-							return nil
-						}(),
+							funcDecl.ParametersJSONSchema = json.RawMessage(raw)
+						} else {
+							funcDecl.Parameters = convertFunctionParametersToSchema(*tool.ResponsesToolFunction.Parameters)
+						}
 					}
 					geminiTool.FunctionDeclarations = append(geminiTool.FunctionDeclarations, funcDecl)
 				}
@@ -2834,9 +2850,9 @@ func convertResponsesToolsToGemini(tools []schemas.ResponsesTool) []Tool {
 	}
 
 	if len(geminiTool.FunctionDeclarations) > 0 || geminiTool.GoogleSearch != nil {
-		return []Tool{geminiTool}
+		return []Tool{geminiTool}, nil
 	}
-	return []Tool{}
+	return []Tool{}, nil
 }
 
 // convertResponsesToolChoiceToGemini converts Responses tool choice to Gemini tool config

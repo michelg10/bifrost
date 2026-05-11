@@ -8,10 +8,31 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
+// geminiChatConvertOptions holds optional behavior for ToGeminiChatCompletionRequest.
+type geminiChatConvertOptions struct {
+	toolParametersAsJSONSchema bool
+}
+
+// GeminiChatConvertOption configures ToGeminiChatCompletionRequest and ToGeminiResponsesRequest.
+type GeminiChatConvertOption func(*geminiChatConvertOptions)
+
+// WithToolParametersJSONSchema sends tool parameters as parametersJsonSchema (raw JSON Schema)
+// instead of parameters (Gemini Schema object). These fields are mutually exclusive
+func WithToolParametersJSONSchema() GeminiChatConvertOption {
+	return func(o *geminiChatConvertOptions) {
+		o.toolParametersAsJSONSchema = true
+	}
+}
+
 // ToGeminiChatCompletionRequest converts a BifrostChatRequest to Gemini's generation request format for chat completion
-func ToGeminiChatCompletionRequest(bifrostReq *schemas.BifrostChatRequest) (*GeminiGenerationRequest, error) {
+func ToGeminiChatCompletionRequest(bifrostReq *schemas.BifrostChatRequest, opts ...GeminiChatConvertOption) (*GeminiGenerationRequest, error) {
 	if bifrostReq == nil {
 		return nil, nil
+	}
+
+	var opt geminiChatConvertOptions
+	for _, f := range opts {
+		f(&opt)
 	}
 
 	bifrostReq.Model = NormalizeModelName(bifrostReq.Model)
@@ -31,7 +52,11 @@ func ToGeminiChatCompletionRequest(bifrostReq *schemas.BifrostChatRequest) (*Gem
 		}
 		// Handle tool-related parameters
 		if len(bifrostReq.Params.Tools) > 0 {
-			geminiReq.Tools = convertBifrostToolsToGemini(bifrostReq.Params.Tools)
+			tools, err := convertBifrostToolsToGemini(bifrostReq.Params.Tools, opt.toolParametersAsJSONSchema)
+			if err != nil {
+				return nil, err
+			}
+			geminiReq.Tools = tools
 
 			// Convert tool choice to tool config
 			if bifrostReq.Params.ToolChoice != nil {

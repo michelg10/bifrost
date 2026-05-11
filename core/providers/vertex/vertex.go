@@ -35,6 +35,30 @@ type VertexError struct {
 	} `json:"error"`
 }
 
+// vertexGeminiOpts returns Gemini conversion options for Vertex-only quirks.
+// All Vertex Gemini models with tools use parametersJsonSchema to avoid schema
+// validation rejections that occur with the structured Schema path on Vertex.
+func vertexGeminiOpts(hasTools bool) []gemini.GeminiChatConvertOption {
+	if !hasTools {
+		return nil
+	}
+	return []gemini.GeminiChatConvertOption{gemini.WithToolParametersJSONSchema()}
+}
+
+func vertexGeminiChatConvertOpts(request *schemas.BifrostChatRequest) []gemini.GeminiChatConvertOption {
+	if request == nil || request.Params == nil {
+		return nil
+	}
+	return vertexGeminiOpts(len(request.Params.Tools) > 0)
+}
+
+func vertexGeminiResponsesConvertOpts(request *schemas.BifrostResponsesRequest) []gemini.GeminiChatConvertOption {
+	if request == nil || request.Params == nil {
+		return nil
+	}
+	return vertexGeminiOpts(len(request.Params.Tools) > 0)
+}
+
 // vertexTokenSourcePool caches oauth2.TokenSource instances keyed by a hash of
 // the auth credentials. The Google TokenSource internally handles token refresh
 // and expiry, so caching the source avoids re-parsing credentials JSON and
@@ -468,7 +492,7 @@ func (provider *VertexProvider) ChatCompletion(ctx *schemas.BifrostContext, key 
 					return nil, fmt.Errorf("failed to delete model field: %w", err)
 				}
 			} else if schemas.IsGeminiModel(request.Model) || schemas.IsAllDigitsASCII(request.Model) || schemas.IsGemmaModel(request.Model) {
-				reqBody, err := gemini.ToGeminiChatCompletionRequest(request)
+				reqBody, err := gemini.ToGeminiChatCompletionRequest(request, vertexGeminiChatConvertOpts(request)...)
 				if err != nil {
 					return nil, err
 				}
@@ -852,7 +876,7 @@ func (provider *VertexProvider) ChatCompletionStream(ctx *schemas.BifrostContext
 			ctx,
 			request,
 			func() (providerUtils.RequestBodyWithExtraParams, error) {
-				reqBody, err := gemini.ToGeminiChatCompletionRequest(request)
+				reqBody, err := gemini.ToGeminiChatCompletionRequest(request, vertexGeminiChatConvertOpts(request)...)
 				if err != nil {
 					return nil, err
 				}
@@ -1104,7 +1128,7 @@ func (provider *VertexProvider) Responses(ctx *schemas.BifrostContext, key schem
 			ctx,
 			request,
 			func() (providerUtils.RequestBodyWithExtraParams, error) {
-				reqBody, err := gemini.ToGeminiResponsesRequest(request)
+				reqBody, err := gemini.ToGeminiResponsesRequest(request, vertexGeminiResponsesConvertOpts(request)...)
 				if err != nil {
 					return nil, err
 				}
@@ -1319,7 +1343,7 @@ func (provider *VertexProvider) ResponsesStream(ctx *schemas.BifrostContext, pos
 			ctx,
 			request,
 			func() (providerUtils.RequestBodyWithExtraParams, error) {
-				reqBody, err := gemini.ToGeminiResponsesRequest(request)
+				reqBody, err := gemini.ToGeminiResponsesRequest(request, vertexGeminiResponsesConvertOpts(request)...)
 				if err != nil {
 					return nil, err
 				}
@@ -2588,7 +2612,7 @@ func (provider *VertexProvider) CountTokens(ctx *schemas.BifrostContext, key sch
 			ctx,
 			request,
 			func() (providerUtils.RequestBodyWithExtraParams, error) {
-				return gemini.ToGeminiResponsesRequest(request)
+				return gemini.ToGeminiResponsesRequest(request, vertexGeminiResponsesConvertOpts(request)...)
 			},
 		)
 		if bifrostErr != nil {

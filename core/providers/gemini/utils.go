@@ -1127,8 +1127,10 @@ func convertParamsToGenerationConfig(params *schemas.ChatParameters, responseMod
 	return config, nil
 }
 
-// convertBifrostToolsToGemini converts Bifrost tools to Gemini format
-func convertBifrostToolsToGemini(bifrostTools []schemas.ChatTool) []Tool {
+// convertBifrostToolsToGemini converts Bifrost tools to Gemini format.
+// When toolParametersAsJSONSchema is true, parameters are sent as parametersJsonSchema
+// (raw JSON Schema) instead of parameters (Gemini Schema). These fields are mutually exclusive;
+func convertBifrostToolsToGemini(bifrostTools []schemas.ChatTool, toolParametersAsJSONSchema bool) ([]Tool, error) {
 	geminiTool := Tool{}
 
 	for _, tool := range bifrostTools {
@@ -1140,7 +1142,15 @@ func convertBifrostToolsToGemini(bifrostTools []schemas.ChatTool) []Tool {
 				Name: tool.Function.Name,
 			}
 			if tool.Function.Parameters != nil {
-				fd.Parameters = convertFunctionParametersToSchema(*tool.Function.Parameters)
+				if toolParametersAsJSONSchema {
+					raw, err := json.Marshal(tool.Function.Parameters)
+					if err != nil {
+						return nil, fmt.Errorf("marshal tool %q parameters: %w", tool.Function.Name, err)
+					}
+					fd.ParametersJSONSchema = json.RawMessage(raw)
+				} else {
+					fd.Parameters = convertFunctionParametersToSchema(*tool.Function.Parameters)
+				}
 			}
 			if tool.Function.Description != nil {
 				fd.Description = *tool.Function.Description
@@ -1150,9 +1160,9 @@ func convertBifrostToolsToGemini(bifrostTools []schemas.ChatTool) []Tool {
 	}
 
 	if len(geminiTool.FunctionDeclarations) > 0 {
-		return []Tool{geminiTool}
+		return []Tool{geminiTool}, nil
 	}
-	return []Tool{}
+	return []Tool{}, nil
 }
 
 // convertFunctionParametersToSchema converts Bifrost function parameters to Gemini Schema
