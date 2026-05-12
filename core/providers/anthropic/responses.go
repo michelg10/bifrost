@@ -2370,9 +2370,11 @@ func (req *AnthropicMessageRequest) ToBifrostResponsesRequest(ctx *schemas.Bifro
 		}
 	}
 
-	// Convert tool choice if present
+	// Convert tool choice if present. The tools list is needed so the converter
+	// can distinguish forced custom-function choices from forced server-tool
+	// choices (see convertAnthropicToolChoiceToBifrost / LOCAL FORK PATCH).
 	if req.ToolChoice != nil {
-		bifrostToolChoice := convertAnthropicToolChoiceToBifrost(req.ToolChoice)
+		bifrostToolChoice := convertAnthropicToolChoiceToBifrost(req.ToolChoice, req.Tools)
 		if bifrostToolChoice != nil {
 			bifrostReq.Params.ToolChoice = bifrostToolChoice
 		}
@@ -5037,8 +5039,16 @@ func convertAnthropicToolToBifrost(tool *AnthropicTool) *schemas.ResponsesTool {
 	return bifrostTool
 }
 
-// convertAnthropicToolChoiceToBifrost converts AnthropicToolChoice to schemas.ToolChoice
-func convertAnthropicToolChoiceToBifrost(toolChoice *AnthropicToolChoice) *schemas.ResponsesToolChoice {
+// convertAnthropicToolChoiceToBifrost converts AnthropicToolChoice to schemas.ToolChoice.
+//
+// LOCAL FORK PATCH (see commit message): signature gained `tools` so that the
+// "tool" case can disambiguate whether the named tool is a user-defined
+// function or an Anthropic server tool (web_search, computer_*, etc.).
+// Previously this hardcoded Type=function for every "tool" choice, which broke
+// for forced server-tool calls because OpenAI's Responses API matches built-ins
+// by type alone (no name) and rejects function-shaped tool_choice against a
+// non-function tool.
+func convertAnthropicToolChoiceToBifrost(toolChoice *AnthropicToolChoice, tools []AnthropicTool) *schemas.ResponsesToolChoice {
 	if toolChoice == nil {
 		return nil
 	}
@@ -5055,7 +5065,35 @@ func convertAnthropicToolChoiceToBifrost(toolChoice *AnthropicToolChoice) *schem
 		case "none":
 			bifrostToolChoice.ResponsesToolChoiceStr = schemas.Ptr(string(schemas.ResponsesToolChoiceTypeNone))
 		case "tool":
-			// Handle forced tool choice with specific function name
+			// Look up the named tool to determine whether it's a custom function
+			// or an Anthropic server tool with a Responses-tool-choice equivalent.
+			var matchedType AnthropicToolType
+			for i := range tools {
+				if tools[i].Name == toolChoice.Name && tools[i].Type != nil {
+					matchedType = *tools[i].Type
+					break
+				}
+			}
+			if matchedType != "" && matchedType != AnthropicToolTypeCustom {
+				if responsesType, ok := anthropicServerToolTypeToResponsesChoiceType(string(matchedType)); ok {
+					// Server tool with a Responses tool_choice equivalent — force
+					// by type, no name (built-ins are singletons).
+					bifrostToolChoice.ResponsesToolChoiceStruct = &schemas.ResponsesToolChoiceStruct{
+						Type: responsesType,
+					}
+					return bifrostToolChoice
+				}
+				// Server tool with no Responses tool_choice equivalent
+				// (web_fetch_*, bash_*, text_editor_*, memory_*, tool_search_*).
+				// Falling back to "required" forces the model to use SOME tool,
+				// which is the closest available semantics. Better than emitting
+				// an invalid function-shaped choice that the upstream rejects.
+				bifrostToolChoice.ResponsesToolChoiceStr = schemas.Ptr(string(schemas.ResponsesToolChoiceTypeRequired))
+				return bifrostToolChoice
+			}
+			// Custom function, or tool not found in the tools list (preserve
+			// pre-patch behavior: emit function-shape and let the upstream
+			// surface the inconsistency).
 			bifrostToolChoice.ResponsesToolChoiceStruct = &schemas.ResponsesToolChoiceStruct{
 				Type: schemas.ResponsesToolChoiceTypeFunction,
 				Name: &toolChoice.Name,
@@ -5067,6 +5105,28 @@ func convertAnthropicToolChoiceToBifrost(toolChoice *AnthropicToolChoice) *schem
 	}
 
 	return bifrostToolChoice
+}
+
+// anthropicServerToolTypeToResponsesChoiceType maps an Anthropic server-tool
+// type (e.g. "web_search_20250305", "computer_20251124") to the corresponding
+// OpenAI Responses tool_choice type. Returns ("", false) for custom functions
+// or for server tools without a Responses tool_choice equivalent
+// (web_fetch_*, bash_*, text_editor_*, memory_*, tool_search_*).
+//
+// LOCAL FORK PATCH (see commit message). Prefix matching mirrors the existing
+// tool-translation switches in chat.go so future date-stamped variants flow
+// through without code changes.
+func anthropicServerToolTypeToResponsesChoiceType(toolType string) (schemas.ResponsesToolChoiceType, bool) {
+	switch {
+	case strings.HasPrefix(toolType, "web_search_"):
+		return schemas.ResponsesToolChoiceTypeWebSearch, true
+	case strings.HasPrefix(toolType, "computer_"):
+		return schemas.ResponsesToolChoiceTypeComputerUsePreview, true
+	case strings.HasPrefix(toolType, "code_execution_"):
+		return schemas.ResponsesToolChoiceTypeCodeInterpreter, true
+	default:
+		return "", false
+	}
 }
 
 // flushPendingContentBlocks is a helper that flushes accumulated content blocks into an assistant message

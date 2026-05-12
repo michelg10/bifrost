@@ -1620,6 +1620,9 @@ const (
 	ResponsesToolChoiceTypeFileSearch ResponsesToolChoiceType = "file_search"
 	// ResponsesToolChoiceTypeWebSearchPreview means a web search preview tool must be called
 	ResponsesToolChoiceTypeWebSearchPreview ResponsesToolChoiceType = "web_search_preview"
+	// ResponsesToolChoiceTypeWebSearch means OpenAI's GA hosted web_search tool must be called
+	// (paired with tools entries of type "web_search"; "web_search_preview" is the older variant)
+	ResponsesToolChoiceTypeWebSearch ResponsesToolChoiceType = "web_search"
 	// ResponsesToolChoiceTypeComputerUsePreview means a computer use preview tool must be called
 	ResponsesToolChoiceTypeComputerUsePreview ResponsesToolChoiceType = "computer_use_preview"
 	// ResponsesToolChoiceTypeCodeInterpreter means a code interpreter tool must be called
