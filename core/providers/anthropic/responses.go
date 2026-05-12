@@ -1645,8 +1645,8 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 								reasoningEnvelope.EncryptedContent = bifrostResp.Item.ResponsesReasoning.EncryptedContent
 							}
 						}
-						// Preserve signature if present
-						if bifrostResp.Item.ResponsesReasoning != nil && bifrostResp.Item.ResponsesReasoning.EncryptedContent != nil && *bifrostResp.Item.ResponsesReasoning.EncryptedContent != "" {
+						// Preserve encrypted content for native non-OpenAI reasoning streams.
+						if !supportsOpenAIReasoningEnvelope(bifrostResp.ExtraFields.Provider) && bifrostResp.Item.ResponsesReasoning != nil && bifrostResp.Item.ResponsesReasoning.EncryptedContent != nil && *bifrostResp.Item.ResponsesReasoning.EncryptedContent != "" {
 							contentBlock.Data = bifrostResp.Item.ResponsesReasoning.EncryptedContent
 							// When signature is present but thinking content is empty, use redacted_thinking
 							if contentBlock.Thinking != nil && *contentBlock.Thinking == "" {
@@ -2386,9 +2386,6 @@ func (req *AnthropicMessageRequest) ToBifrostResponsesRequest(ctx *schemas.Bifro
 	if req.ServiceTier != nil {
 		mapped := MapAnthropicRequestServiceTierToBifrost(*req.ServiceTier)
 		params.ServiceTier = &mapped
-	}
-	if params.Reasoning != nil {
-		appendUniqueInclude(params, openAIReasoningEncryptedContentInclude)
 	}
 
 	// Add truncation parameter if computer tool is being used
@@ -4629,8 +4626,9 @@ func appendBifrostReasoningEnvelopeBlocks(blocks []AnthropicContentBlock, msg *s
 	}
 	if len(summary) == 0 {
 		blocks = append(blocks, AnthropicContentBlock{
-			Type: AnthropicContentBlockTypeRedactedThinking,
-			Data: envelope,
+			Type:      AnthropicContentBlockTypeThinking,
+			Thinking:  schemas.Ptr(""),
+			Signature: envelope,
 		})
 		return blocks
 	}

@@ -9,7 +9,6 @@ import (
 )
 
 const bifrostReasoningEnvelopePrefix = "bfrs1."
-const openAIReasoningEncryptedContentInclude = "reasoning.encrypted_content"
 
 type bifrostReasoningEnvelope struct {
 	Version          int                                 `json:"v"`
