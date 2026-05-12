@@ -1,0 +1,249 @@
+package anthropic
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+func TestBifrostReasoningEnvelopeRoundTrip(t *testing.T) {
+	reasoningID := "rs_123"
+	status := "completed"
+	responseID := "resp_123"
+	encrypted := "enc_123"
+	envelope := bifrostReasoningEnvelope{
+		ResponseID:       &responseID,
+		ReasoningID:      &reasoningID,
+		Status:           &status,
+		EncryptedContent: &encrypted,
+		Summary: []schemas.ResponsesReasoningSummary{{
+			Type: schemas.ResponsesReasoningContentBlockTypeSummaryText,
+			Text: "summary",
+		}},
+	}
+
+	encoded, err := encodeBifrostReasoningEnvelope(envelope)
+	if err != nil {
+		t.Fatalf("encodeBifrostReasoningEnvelope returned error: %v", err)
+	}
+	if !strings.HasPrefix(encoded, bifrostReasoningEnvelopePrefix) {
+		t.Fatalf("encoded envelope prefix = %q, want %q", encoded, bifrostReasoningEnvelopePrefix)
+	}
+
+	decoded, ok := decodeBifrostReasoningEnvelope(&encoded)
+	if !ok {
+		t.Fatal("expected envelope to decode")
+	}
+	if decoded.ReasoningID == nil || *decoded.ReasoningID != reasoningID {
+		t.Fatalf("reasoning id = %v, want %q", decoded.ReasoningID, reasoningID)
+	}
+	if decoded.Status == nil || *decoded.Status != status {
+		t.Fatalf("status = %v, want %q", decoded.Status, status)
+	}
+	if decoded.ResponseID == nil || *decoded.ResponseID != responseID {
+		t.Fatalf("response id = %v, want %q", decoded.ResponseID, responseID)
+	}
+	if decoded.EncryptedContent == nil || *decoded.EncryptedContent != encrypted {
+		t.Fatalf("encrypted content = %v, want %q", decoded.EncryptedContent, encrypted)
+	}
+	if len(decoded.Summary) != 1 || decoded.Summary[0].Text != "summary" {
+		t.Fatalf("summary = %#v, want one summary", decoded.Summary)
+	}
+}
+
+func TestDecodeBifrostReasoningEnvelopeIgnoresNativeSignature(t *testing.T) {
+	native := "anthropic_native_signature"
+	if _, ok := decodeBifrostReasoningEnvelope(&native); ok {
+		t.Fatal("expected native Anthropic signature not to decode")
+	}
+}
+
+func TestAnthropicThinkingEnvelopeRestoresReasoningMessage(t *testing.T) {
+	reasoningID := "rs_restore"
+	status := "completed"
+	encrypted := "enc_restore"
+	summary := []schemas.ResponsesReasoningSummary{{
+		Type: schemas.ResponsesReasoningContentBlockTypeSummaryText,
+		Text: "visible summary",
+	}}
+	encoded, err := encodeBifrostReasoningEnvelope(bifrostReasoningEnvelope{
+		ReasoningID:      &reasoningID,
+		Status:           &status,
+		Summary:          summary,
+		EncryptedContent: &encrypted,
+	})
+	if err != nil {
+		t.Fatalf("encodeBifrostReasoningEnvelope returned error: %v", err)
+	}
+
+	block := AnthropicContentBlock{
+		Type:      AnthropicContentBlockTypeThinking,
+		Thinking:  schemas.Ptr("visible summary"),
+		Signature: &encoded,
+	}
+	msg := convertAnthropicThinkingEnvelopeToBifrostReasoning(&block)
+	if msg == nil {
+		t.Fatal("expected reasoning message")
+	}
+	if msg.ID == nil || *msg.ID != reasoningID {
+		t.Fatalf("id = %v, want %q", msg.ID, reasoningID)
+	}
+	if msg.Status == nil || *msg.Status != status {
+		t.Fatalf("status = %v, want %q", msg.Status, status)
+	}
+	if msg.ResponsesReasoning == nil || msg.ResponsesReasoning.EncryptedContent == nil || *msg.ResponsesReasoning.EncryptedContent != encrypted {
+		t.Fatalf("encrypted content not restored: %#v", msg.ResponsesReasoning)
+	}
+	if len(msg.ResponsesReasoning.Summary) != 1 || msg.ResponsesReasoning.Summary[0].Text != "visible summary" {
+		t.Fatalf("summary = %#v", msg.ResponsesReasoning.Summary)
+	}
+}
+
+func TestToBifrostResponsesRequestAddsReasoningEncryptedContentInclude(t *testing.T) {
+	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
+	defer cancel()
+
+	req := &AnthropicMessageRequest{
+		Model:     "azure/gpt-5.5-cc",
+		MaxTokens: 1024,
+		Thinking:  &AnthropicThinking{Type: "enabled"},
+		Messages: []AnthropicMessage{{
+			Role: AnthropicMessageRoleUser,
+			Content: AnthropicContent{
+				ContentStr: schemas.Ptr("hello"),
+			},
+		}},
+	}
+
+	got := req.ToBifrostResponsesRequest(ctx)
+	if got == nil || got.Params == nil {
+		t.Fatal("expected params")
+	}
+	var found bool
+	for _, include := range got.Params.Include {
+		if include == openAIReasoningEncryptedContentInclude {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("include = %#v, want %q", got.Params.Include, openAIReasoningEncryptedContentInclude)
+	}
+}
+
+func TestToAnthropicResponsesResponseEmitsReasoningEnvelope(t *testing.T) {
+	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
+	defer cancel()
+
+	reasoningID := "rs_nonstream"
+	status := "completed"
+	encrypted := "enc_nonstream"
+	respID := "resp_nonstream"
+	resp := &schemas.BifrostResponsesResponse{
+		ID:    &respID,
+		Model: "gpt-5.5-cc",
+		ExtraFields: schemas.BifrostResponseExtraFields{
+			Provider: schemas.Azure,
+		},
+		Output: []schemas.ResponsesMessage{{
+			ID:     &reasoningID,
+			Type:   schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+			Status: &status,
+			ResponsesReasoning: &schemas.ResponsesReasoning{
+				Summary: []schemas.ResponsesReasoningSummary{{
+					Type: schemas.ResponsesReasoningContentBlockTypeSummaryText,
+					Text: "summary",
+				}},
+				EncryptedContent: &encrypted,
+			},
+		}},
+	}
+
+	got := ToAnthropicResponsesResponse(ctx, resp)
+	if len(got.Content) != 1 {
+		t.Fatalf("content len = %d, want 1", len(got.Content))
+	}
+	block := got.Content[0]
+	if block.Type != AnthropicContentBlockTypeThinking || block.Signature == nil {
+		t.Fatalf("block = %#v, want thinking with signature", block)
+	}
+	decoded, ok := decodeBifrostReasoningEnvelope(block.Signature)
+	if !ok {
+		t.Fatal("expected signature envelope")
+	}
+	if decoded.ReasoningID == nil || *decoded.ReasoningID != reasoningID {
+		t.Fatalf("reasoning id = %v, want %q", decoded.ReasoningID, reasoningID)
+	}
+}
+
+func TestToAnthropicResponsesStreamResponseEmitsReasoningSignatureEnvelope(t *testing.T) {
+	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
+	defer cancel()
+
+	reasoningID := "rs_stream"
+	outputIndex := 0
+	status := "completed"
+	added := &schemas.BifrostResponsesStreamResponse{
+		Type:        schemas.ResponsesStreamResponseTypeOutputItemAdded,
+		OutputIndex: &outputIndex,
+		ExtraFields: schemas.BifrostResponseExtraFields{
+			Provider: schemas.Azure,
+		},
+		Item: &schemas.ResponsesMessage{
+			ID:   &reasoningID,
+			Type: schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+		},
+	}
+	if events := ToAnthropicResponsesStreamResponse(ctx, added); len(events) != 1 || events[0].Type != AnthropicStreamEventTypeContentBlockStart {
+		t.Fatalf("added events = %#v", events)
+	}
+
+	delta := "stream summary"
+	itemID := reasoningID
+	deltaResp := &schemas.BifrostResponsesStreamResponse{
+		Type:        schemas.ResponsesStreamResponseTypeReasoningSummaryTextDelta,
+		OutputIndex: &outputIndex,
+		ItemID:      &itemID,
+		Delta:       &delta,
+		ExtraFields: schemas.BifrostResponseExtraFields{
+			Provider: schemas.Azure,
+		},
+	}
+	if events := ToAnthropicResponsesStreamResponse(ctx, deltaResp); len(events) != 1 || events[0].Delta == nil || events[0].Delta.Thinking == nil {
+		t.Fatalf("delta events = %#v", events)
+	}
+
+	done := &schemas.BifrostResponsesStreamResponse{
+		Type:        schemas.ResponsesStreamResponseTypeOutputItemDone,
+		OutputIndex: &outputIndex,
+		ExtraFields: schemas.BifrostResponseExtraFields{
+			Provider: schemas.Azure,
+		},
+		Item: &schemas.ResponsesMessage{
+			ID:     &reasoningID,
+			Type:   schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+			Status: &status,
+		},
+	}
+	events := ToAnthropicResponsesStreamResponse(ctx, done)
+	if len(events) != 2 {
+		t.Fatalf("done events len = %d, want 2: %#v", len(events), events)
+	}
+	if events[0].Type != AnthropicStreamEventTypeContentBlockDelta || events[0].Delta == nil || events[0].Delta.Signature == nil {
+		t.Fatalf("first done event = %#v, want signature delta", events[0])
+	}
+	if events[1].Type != AnthropicStreamEventTypeContentBlockStop {
+		t.Fatalf("second done event = %#v, want stop", events[1])
+	}
+	decoded, ok := decodeBifrostReasoningEnvelope(events[0].Delta.Signature)
+	if !ok {
+		t.Fatal("expected signature envelope")
+	}
+	if decoded.ReasoningID == nil || *decoded.ReasoningID != reasoningID {
+		t.Fatalf("reasoning id = %v, want %q", decoded.ReasoningID, reasoningID)
+	}
+	if len(decoded.Summary) != 1 || decoded.Summary[0].Text != delta {
+		t.Fatalf("summary = %#v, want %q", decoded.Summary, delta)
+	}
+}

@@ -301,6 +301,61 @@ func TestToOpenAIResponsesRequest_ReasoningStringContent(t *testing.T) {
 	})
 }
 
+func TestToOpenAIResponsesRequest_PreservesReplayedReasoningItem(t *testing.T) {
+	reasoningID := "rs_replayed"
+	status := "completed"
+	encrypted := "enc_replayed"
+	bifrostReq := &schemas.BifrostResponsesRequest{
+		Provider: schemas.Azure,
+		Model:    "gpt-5.5",
+		Input: []schemas.ResponsesMessage{
+			{
+				ID:     &reasoningID,
+				Type:   schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+				Role:   schemas.Ptr(schemas.ResponsesInputMessageRoleAssistant),
+				Status: &status,
+				ResponsesReasoning: &schemas.ResponsesReasoning{
+					Summary: []schemas.ResponsesReasoningSummary{{
+						Type: schemas.ResponsesReasoningContentBlockTypeSummaryText,
+						Text: "summary",
+					}},
+					EncryptedContent: &encrypted,
+				},
+			},
+			{
+				Type: schemas.Ptr(schemas.ResponsesMessageTypeFunctionCallOutput),
+				ResponsesToolMessage: &schemas.ResponsesToolMessage{
+					CallID: schemas.Ptr("call_123"),
+					Output: &schemas.ResponsesToolMessageOutputStruct{
+						ResponsesToolCallOutputStr: schemas.Ptr("tool output"),
+					},
+				},
+			},
+		},
+	}
+
+	result := ToOpenAIResponsesRequest(bifrostReq)
+	if result == nil {
+		t.Fatal("ToOpenAIResponsesRequest returned nil")
+	}
+	if len(result.Input.OpenAIResponsesRequestInputArray) != 2 {
+		t.Fatalf("input len = %d, want 2", len(result.Input.OpenAIResponsesRequestInputArray))
+	}
+	reasoning := result.Input.OpenAIResponsesRequestInputArray[0]
+	if reasoning.ID == nil || *reasoning.ID != reasoningID {
+		t.Fatalf("reasoning id = %v, want %q", reasoning.ID, reasoningID)
+	}
+	if reasoning.Role != nil {
+		t.Fatalf("reasoning role = %v, want nil", *reasoning.Role)
+	}
+	if reasoning.Status == nil || *reasoning.Status != status {
+		t.Fatalf("reasoning status = %v, want %q", reasoning.Status, status)
+	}
+	if reasoning.ResponsesReasoning == nil || reasoning.ResponsesReasoning.EncryptedContent == nil || *reasoning.ResponsesReasoning.EncryptedContent != encrypted {
+		t.Fatalf("reasoning encrypted content = %#v", reasoning.ResponsesReasoning)
+	}
+}
+
 func TestToOpenAIResponsesRequest_NormalizesReasoningEffort(t *testing.T) {
 	tests := []struct {
 		name     string
