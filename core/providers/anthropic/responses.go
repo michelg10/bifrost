@@ -164,6 +164,10 @@ type anthropicToResponsesStreamState struct {
 	// can be skipped and regenerated synthetically (with sanitization) at output_item.done.
 	webSearchItemIDs map[string]bool
 
+	// reasoningItems accumulates per-item reasoning envelopes (summary text +
+	// signature) so reasoning content survives the round trip for continuity.
+	reasoningItems map[string]*bifrostReasoningEnvelope
+
 	// Anthropic content-block index allocation. OpenAI numbers output items while
 	// Anthropic numbers content blocks, and one web_search / code_execution call
 	// expands to two Anthropic blocks (server_tool_use + *_tool_result) — so the
@@ -258,6 +262,18 @@ func reverseStreamItemKey(resp *schemas.BifrostResponsesStreamResponse) string {
 		return fmt.Sprintf("ci:%d", *resp.ContentIndex)
 	}
 	return ""
+}
+
+func (state *anthropicToResponsesStreamState) getReasoningEnvelope(itemID string) *bifrostReasoningEnvelope {
+	if state.reasoningItems == nil {
+		state.reasoningItems = make(map[string]*bifrostReasoningEnvelope)
+	}
+	item := state.reasoningItems[itemID]
+	if item == nil {
+		item = &bifrostReasoningEnvelope{ReasoningID: schemas.Ptr(itemID)}
+		state.reasoningItems[itemID] = item
+	}
+	return item
 }
 
 type anthropicToResponsesStreamStateKeyType struct{}
@@ -2504,6 +2520,19 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 						contentBlock.Type = AnthropicContentBlockTypeThinking
 						contentBlock.Thinking = schemas.Ptr("")
 						contentBlock.Signature = schemas.Ptr("")
+						if bifrostResp.Item.ID != nil && supportsOpenAIReasoningEnvelope(bifrostResp.ExtraFields.Provider) {
+							streamState := getOrCreateAnthropicToResponsesStreamState(ctx)
+							reasoningEnvelope := streamState.getReasoningEnvelope(*bifrostResp.Item.ID)
+							reasoningEnvelope.ReasoningID = bifrostResp.Item.ID
+							reasoningEnvelope.Status = bifrostResp.Item.Status
+							if bifrostResp.Response != nil {
+								reasoningEnvelope.ResponseID = bifrostResp.Response.ID
+							}
+							if bifrostResp.Item.ResponsesReasoning != nil {
+								reasoningEnvelope.Summary = bifrostResp.Item.ResponsesReasoning.Summary
+								reasoningEnvelope.EncryptedContent = bifrostResp.Item.ResponsesReasoning.EncryptedContent
+							}
+						}
 						// Preserve signature if present
 						if bifrostResp.Item.ResponsesReasoning != nil && bifrostResp.Item.ResponsesReasoning.EncryptedContent != nil && *bifrostResp.Item.ResponsesReasoning.EncryptedContent != "" {
 							contentBlock.Data = bifrostResp.Item.ResponsesReasoning.EncryptedContent
@@ -2693,6 +2722,18 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 			}
 		} else if bifrostResp.Delta != nil {
 			// This is a thinking_delta
+			if bifrostResp.ItemID != nil && supportsOpenAIReasoningEnvelope(bifrostResp.ExtraFields.Provider) {
+				streamState := getOrCreateAnthropicToResponsesStreamState(ctx)
+				reasoningEnvelope := streamState.getReasoningEnvelope(*bifrostResp.ItemID)
+				if len(reasoningEnvelope.Summary) == 0 {
+					reasoningEnvelope.Summary = append(reasoningEnvelope.Summary, schemas.ResponsesReasoningSummary{
+						Type: schemas.ResponsesReasoningContentBlockTypeSummaryText,
+						Text: *bifrostResp.Delta,
+					})
+				} else {
+					reasoningEnvelope.Summary[0].Text += *bifrostResp.Delta
+				}
+			}
 			streamResp.Delta = &AnthropicStreamDelta{
 				Type:     AnthropicStreamDeltaTypeThinking,
 				Thinking: bifrostResp.Delta,
@@ -2980,6 +3021,58 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 			})
 
 			return events
+		} else if bifrostResp.Item != nil &&
+			bifrostResp.Item.Type != nil &&
+			*bifrostResp.Item.Type == schemas.ResponsesMessageTypeReasoning &&
+			supportsOpenAIReasoningEnvelope(bifrostResp.ExtraFields.Provider) {
+
+			var indexToUse *int
+			if bifrostResp.OutputIndex != nil {
+				indexToUse = bifrostResp.OutputIndex
+			} else if bifrostResp.ContentIndex != nil {
+				indexToUse = bifrostResp.ContentIndex
+			}
+			streamState := getOrCreateAnthropicToResponsesStreamState(ctx)
+			var reasoningEnvelope *bifrostReasoningEnvelope
+			if bifrostResp.Item.ID != nil {
+				reasoningEnvelope = streamState.getReasoningEnvelope(*bifrostResp.Item.ID)
+				reasoningEnvelope.ReasoningID = bifrostResp.Item.ID
+			}
+			if reasoningEnvelope != nil {
+				reasoningEnvelope.Status = bifrostResp.Item.Status
+				if bifrostResp.Response != nil {
+					reasoningEnvelope.ResponseID = bifrostResp.Response.ID
+				}
+				if bifrostResp.Item.ResponsesReasoning != nil {
+					if len(bifrostResp.Item.ResponsesReasoning.Summary) > 0 {
+						reasoningEnvelope.Summary = bifrostResp.Item.ResponsesReasoning.Summary
+					}
+					reasoningEnvelope.EncryptedContent = bifrostResp.Item.ResponsesReasoning.EncryptedContent
+				}
+				if encoded, err := encodeBifrostReasoningEnvelope(*reasoningEnvelope); err == nil {
+					signature := encoded
+					events := []*AnthropicStreamEvent{
+						{
+							Type:  AnthropicStreamEventTypeContentBlockDelta,
+							Index: indexToUse,
+							Delta: &AnthropicStreamDelta{
+								Type:      AnthropicStreamDeltaTypeSignature,
+								Signature: &signature,
+							},
+						},
+						{
+							Type:  AnthropicStreamEventTypeContentBlockStop,
+							Index: indexToUse,
+						},
+					}
+					if bifrostResp.Item.ID != nil {
+						delete(streamState.reasoningItems, *bifrostResp.Item.ID)
+					}
+					return events
+				}
+			}
+			streamResp.Type = AnthropicStreamEventTypeContentBlockStop
+			streamResp.Index = indexToUse
 		} else if bifrostResp.Item != nil &&
 			bifrostResp.Item.Type != nil &&
 			(*bifrostResp.Item.Type == schemas.ResponsesMessageTypeFunctionCall ||
@@ -3277,6 +3370,9 @@ func (req *AnthropicMessageRequest) ToBifrostResponsesRequest(ctx *schemas.Bifro
 		mapped := MapAnthropicRequestServiceTierToBifrost(*req.ServiceTier)
 		params.ServiceTier = &mapped
 	}
+	if params.Reasoning != nil {
+		appendUniqueInclude(params, openAIReasoningEncryptedContentInclude)
+	}
 
 	// Add truncation parameter if computer tool is being used
 	if provider == schemas.OpenAI && req.Tools != nil {
@@ -3288,7 +3384,7 @@ func (req *AnthropicMessageRequest) ToBifrostResponsesRequest(ctx *schemas.Bifro
 			case AnthropicToolTypeComputer20250124, AnthropicToolTypeComputer20251124:
 				params.Truncation = schemas.Ptr("auto")
 			case AnthropicToolTypeWebSearch20250305, AnthropicToolTypeWebSearch20260209:
-				params.Include = []string{"web_search_call.action.sources"}
+				appendUniqueInclude(params, "web_search_call.action.sources")
 			}
 		}
 	}
@@ -3928,7 +4024,10 @@ func ToAnthropicResponsesResponse(ctx *schemas.BifrostContext, bifrostResp *sche
 	// Convert output messages to Anthropic content blocks using the new conversion method
 	var contentBlocks []AnthropicContentBlock
 	if bifrostResp.Output != nil {
-		anthropicMessages, _ := ConvertBifrostMessagesToAnthropicMessages(ctx, bifrostResp.Output, false, "", "")
+		anthropicMessages, _ := convertBifrostMessagesToAnthropicMessagesWithOptions(ctx, bifrostResp.Output, false, "", "", bifrostToAnthropicConversionOptions{
+			ReasoningEnvelopeResponseID: bifrostResp.ID,
+			EmitReasoningEnvelope:       supportsOpenAIReasoningEnvelope(bifrostResp.ExtraFields.Provider),
+		})
 		// Extract content blocks from the converted messages
 		for _, msg := range anthropicMessages {
 			if msg.Content.ContentBlocks != nil {
@@ -4036,10 +4135,19 @@ func ConvertAnthropicMessagesToBifrostMessages(ctx *schemas.BifrostContext, anth
 	return bifrostMessages
 }
 
+type bifrostToAnthropicConversionOptions struct {
+	ReasoningEnvelopeResponseID *string
+	EmitReasoningEnvelope       bool
+}
+
 // ConvertBifrostMessagesToAnthropicMessages converts an array of Bifrost ResponsesMessage to Anthropic message format
 // This is the main conversion method from Bifrost to Anthropic - handles all message types and returns messages + system content.
 // provider and model are used to gate mid-conversation system message support (Anthropic + Opus 4.8+ only).
 func ConvertBifrostMessagesToAnthropicMessages(ctx *schemas.BifrostContext, bifrostMessages []schemas.ResponsesMessage, isRequestMessage bool, provider schemas.ModelProvider, model string) ([]AnthropicMessage, *AnthropicContent) {
+	return convertBifrostMessagesToAnthropicMessagesWithOptions(ctx, bifrostMessages, isRequestMessage, provider, model, bifrostToAnthropicConversionOptions{})
+}
+
+func convertBifrostMessagesToAnthropicMessagesWithOptions(ctx *schemas.BifrostContext, bifrostMessages []schemas.ResponsesMessage, isRequestMessage bool, provider schemas.ModelProvider, model string, opts bifrostToAnthropicConversionOptions) ([]AnthropicMessage, *AnthropicContent) {
 	// If only a single system message is present, convert it user message (since openai allows it)
 	if len(bifrostMessages) == 1 && bifrostMessages[0].Role != nil && (*bifrostMessages[0].Role == schemas.ResponsesInputMessageRoleSystem || *bifrostMessages[0].Role == schemas.ResponsesInputMessageRoleDeveloper) {
 		if systemContent := convertBifrostMessageToAnthropicSystemContent(&bifrostMessages[0]); systemContent != nil {
@@ -4301,8 +4409,12 @@ func ConvertBifrostMessagesToAnthropicMessages(ctx *schemas.BifrostContext, bifr
 			flushPendingToolResults()
 
 			// Handle reasoning as thinking content
-			reasoningBlocks := convertBifrostReasoningToAnthropicThinking(&msg)
-			pendingReasoningContentBlocks = append(pendingReasoningContentBlocks, reasoningBlocks...)
+			if opts.EmitReasoningEnvelope {
+				pendingReasoningContentBlocks = appendBifrostReasoningEnvelopeBlocks(pendingReasoningContentBlocks, &msg, opts.ReasoningEnvelopeResponseID)
+			} else {
+				reasoningBlocks := convertBifrostReasoningToAnthropicThinking(&msg)
+				pendingReasoningContentBlocks = append(pendingReasoningContentBlocks, reasoningBlocks...)
+			}
 
 		case schemas.ResponsesMessageTypeFunctionCall:
 			// Flush any pending tool results before processing function calls
@@ -4706,6 +4818,17 @@ func ConvertBifrostMessagesToAnthropicMessages(ctx *schemas.BifrostContext, bifr
 		}
 	}
 
+	if len(pendingReasoningContentBlocks) > 0 {
+		copied := make([]AnthropicContentBlock, len(pendingReasoningContentBlocks))
+		copy(copied, pendingReasoningContentBlocks)
+		anthropicMessages = append(anthropicMessages, AnthropicMessage{
+			Role: AnthropicMessageRoleAssistant,
+			Content: AnthropicContent{
+				ContentBlocks: copied,
+			},
+		})
+	}
+
 	return anthropicMessages, systemContent
 }
 
@@ -4895,7 +5018,9 @@ func convertAnthropicContentBlocksToResponsesMessagesGrouped(contentBlocks []Ant
 			}
 
 		case AnthropicContentBlockTypeThinking:
-			if block.Thinking != nil {
+			if decoded := convertAnthropicThinkingEnvelopeToBifrostReasoning(&block); decoded != nil {
+				bifrostMessages = append(bifrostMessages, *decoded)
+			} else if block.Thinking != nil {
 				bifrostMsg := schemas.ResponsesMessage{
 					ID:   schemas.Ptr("rs_" + providerUtils.GetRandomString(50)),
 					Type: schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
@@ -4915,7 +5040,9 @@ func convertAnthropicContentBlocksToResponsesMessagesGrouped(contentBlocks []Ant
 
 		case AnthropicContentBlockTypeRedactedThinking:
 			// Handle redacted thinking (encrypted content)
-			if block.Data != nil {
+			if decoded := convertAnthropicThinkingEnvelopeToBifrostReasoning(&block); decoded != nil {
+				bifrostMessages = append(bifrostMessages, *decoded)
+			} else if block.Data != nil {
 				bifrostMsg := schemas.ResponsesMessage{
 					ID:   schemas.Ptr("rs_" + providerUtils.GetRandomString(50)),
 					Type: schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
@@ -5224,7 +5351,9 @@ func convertAnthropicContentBlocksToResponsesMessages(ctx *schemas.BifrostContex
 				bifrostMessages = append(bifrostMessages, bifrostMsg)
 			}
 		case AnthropicContentBlockTypeThinking:
-			if block.Thinking != nil {
+			if decoded := convertAnthropicThinkingEnvelopeToBifrostReasoning(&block); decoded != nil {
+				bifrostMessages = append(bifrostMessages, *decoded)
+			} else if block.Thinking != nil {
 				// Collect reasoning blocks to create a single reasoning message
 				reasoningContentBlocks = append(reasoningContentBlocks, schemas.ResponsesMessageContentBlock{
 					Type:      schemas.ResponsesOutputMessageContentTypeReasoning,
@@ -5233,7 +5362,9 @@ func convertAnthropicContentBlocksToResponsesMessages(ctx *schemas.BifrostContex
 				})
 			}
 		case AnthropicContentBlockTypeRedactedThinking:
-			if block.Data != nil {
+			if decoded := convertAnthropicThinkingEnvelopeToBifrostReasoning(&block); decoded != nil {
+				bifrostMessages = append(bifrostMessages, *decoded)
+			} else if block.Data != nil {
 				bifrostMsg := schemas.ResponsesMessage{
 					ID:   schemas.Ptr("rs_" + providerUtils.GetRandomString(50)),
 					Type: schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
@@ -5683,6 +5814,94 @@ func convertBifrostMessageToAnthropicMessage(msg *schemas.ResponsesMessage, pend
 	}
 
 	return &anthropicMsg
+}
+
+// convertAnthropicThinkingEnvelopeToBifrostReasoning restores an OpenAI reasoning item
+// that Bifrost previously carried through Anthropic thinking.signature/data.
+func convertAnthropicThinkingEnvelopeToBifrostReasoning(block *AnthropicContentBlock) *schemas.ResponsesMessage {
+	if block == nil {
+		return nil
+	}
+	var envelope *bifrostReasoningEnvelope
+	var ok bool
+	if block.Type == AnthropicContentBlockTypeThinking {
+		envelope, ok = decodeBifrostReasoningEnvelope(block.Signature)
+	} else if block.Type == AnthropicContentBlockTypeRedactedThinking {
+		envelope, ok = decodeBifrostReasoningEnvelope(block.Data)
+	}
+	if !ok || envelope == nil || envelope.ReasoningID == nil {
+		return nil
+	}
+
+	summary := envelope.Summary
+	if len(summary) == 0 && block.Thinking != nil && *block.Thinking != "" {
+		summary = []schemas.ResponsesReasoningSummary{{
+			Type: schemas.ResponsesReasoningContentBlockTypeSummaryText,
+			Text: *block.Thinking,
+		}}
+	}
+	if summary == nil {
+		summary = []schemas.ResponsesReasoningSummary{}
+	}
+
+	msg := &schemas.ResponsesMessage{
+		ID:     envelope.ReasoningID,
+		Type:   schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+		Status: envelope.Status,
+		ResponsesReasoning: &schemas.ResponsesReasoning{
+			Summary:          summary,
+			EncryptedContent: envelope.EncryptedContent,
+		},
+	}
+	return msg
+}
+
+func buildBifrostReasoningEnvelope(msg *schemas.ResponsesMessage, responseID *string) (*string, []schemas.ResponsesReasoningSummary) {
+	if msg == nil || msg.ID == nil || *msg.ID == "" {
+		return nil, nil
+	}
+	envelope := bifrostReasoningEnvelope{
+		ResponseID:  responseID,
+		ReasoningID: msg.ID,
+		Status:      msg.Status,
+	}
+	if msg.ResponsesReasoning != nil {
+		envelope.Summary = msg.ResponsesReasoning.Summary
+		envelope.EncryptedContent = msg.ResponsesReasoning.EncryptedContent
+	}
+	encoded, err := encodeBifrostReasoningEnvelope(envelope)
+	if err != nil {
+		return nil, envelope.Summary
+	}
+	return &encoded, envelope.Summary
+}
+
+func appendBifrostReasoningEnvelopeBlocks(blocks []AnthropicContentBlock, msg *schemas.ResponsesMessage, responseID *string) []AnthropicContentBlock {
+	envelope, summary := buildBifrostReasoningEnvelope(msg, responseID)
+	if envelope == nil {
+		return blocks
+	}
+	if len(summary) == 0 {
+		blocks = append(blocks, AnthropicContentBlock{
+			Type: AnthropicContentBlockTypeRedactedThinking,
+			Data: envelope,
+		})
+		return blocks
+	}
+	var thinkingText strings.Builder
+	for i, reasoningContent := range summary {
+		if i > 0 {
+			thinkingText.WriteByte('\n')
+		}
+		thinkingText.WriteString(reasoningContent.Text)
+	}
+	text := thinkingText.String()
+	blocks = append(blocks, AnthropicContentBlock{
+		Type:      AnthropicContentBlockTypeThinking,
+		Thinking:  &text,
+		Signature: envelope,
+	})
+	return blocks
 }
 
 // convertBifrostReasoningToAnthropicThinking converts a Bifrost reasoning message to Anthropic thinking blocks
