@@ -101,7 +101,7 @@ func TestAnthropicThinkingEnvelopeRestoresReasoningMessage(t *testing.T) {
 	}
 }
 
-func TestToBifrostResponsesRequestAddsReasoningEncryptedContentInclude(t *testing.T) {
+func TestToBifrostResponsesRequestDoesNotAddEncryptedReasoningIncludeByDefault(t *testing.T) {
 	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
 	defer cancel()
 
@@ -121,14 +121,8 @@ func TestToBifrostResponsesRequestAddsReasoningEncryptedContentInclude(t *testin
 	if got == nil || got.Params == nil {
 		t.Fatal("expected params")
 	}
-	var found bool
-	for _, include := range got.Params.Include {
-		if include == openAIReasoningEncryptedContentInclude {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("include = %#v, want %q", got.Params.Include, openAIReasoningEncryptedContentInclude)
+	if len(got.Params.Include) != 0 {
+		t.Fatalf("include = %#v, want empty by default", got.Params.Include)
 	}
 }
 
@@ -177,6 +171,50 @@ func TestToAnthropicResponsesResponseEmitsReasoningEnvelope(t *testing.T) {
 	}
 }
 
+func TestToAnthropicResponsesResponseEmptySummaryUsesThinkingSignatureEnvelope(t *testing.T) {
+	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
+	defer cancel()
+
+	reasoningID := "rs_empty_summary"
+	encrypted := "enc_empty_summary"
+	resp := &schemas.BifrostResponsesResponse{
+		Model: "gpt-5.5-cc",
+		ExtraFields: schemas.BifrostResponseExtraFields{
+			Provider: schemas.Azure,
+		},
+		Output: []schemas.ResponsesMessage{{
+			ID:   &reasoningID,
+			Type: schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+			ResponsesReasoning: &schemas.ResponsesReasoning{
+				Summary:          []schemas.ResponsesReasoningSummary{},
+				EncryptedContent: &encrypted,
+			},
+		}},
+	}
+
+	got := ToAnthropicResponsesResponse(ctx, resp)
+	if len(got.Content) != 1 {
+		t.Fatalf("content len = %d, want 1", len(got.Content))
+	}
+	block := got.Content[0]
+	if block.Type != AnthropicContentBlockTypeThinking {
+		t.Fatalf("block type = %q, want thinking", block.Type)
+	}
+	if block.Thinking == nil || *block.Thinking != "" {
+		t.Fatalf("thinking = %v, want empty string", block.Thinking)
+	}
+	decoded, ok := decodeBifrostReasoningEnvelope(block.Signature)
+	if !ok {
+		t.Fatal("expected signature envelope")
+	}
+	if decoded.ReasoningID == nil || *decoded.ReasoningID != reasoningID {
+		t.Fatalf("reasoning id = %v, want %q", decoded.ReasoningID, reasoningID)
+	}
+	if decoded.EncryptedContent == nil || *decoded.EncryptedContent != encrypted {
+		t.Fatalf("encrypted content = %v, want %q", decoded.EncryptedContent, encrypted)
+	}
+}
+
 func TestToAnthropicResponsesStreamResponseEmitsReasoningSignatureEnvelope(t *testing.T) {
 	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
 	defer cancel()
@@ -184,6 +222,7 @@ func TestToAnthropicResponsesStreamResponseEmitsReasoningSignatureEnvelope(t *te
 	reasoningID := "rs_stream"
 	outputIndex := 0
 	status := "completed"
+	encrypted := "enc_stream"
 	added := &schemas.BifrostResponsesStreamResponse{
 		Type:        schemas.ResponsesStreamResponseTypeOutputItemAdded,
 		OutputIndex: &outputIndex,
@@ -193,10 +232,18 @@ func TestToAnthropicResponsesStreamResponseEmitsReasoningSignatureEnvelope(t *te
 		Item: &schemas.ResponsesMessage{
 			ID:   &reasoningID,
 			Type: schemas.Ptr(schemas.ResponsesMessageTypeReasoning),
+			ResponsesReasoning: &schemas.ResponsesReasoning{
+				Summary:          []schemas.ResponsesReasoningSummary{},
+				EncryptedContent: &encrypted,
+			},
 		},
 	}
-	if events := ToAnthropicResponsesStreamResponse(ctx, added); len(events) != 1 || events[0].Type != AnthropicStreamEventTypeContentBlockStart {
+	events := ToAnthropicResponsesStreamResponse(ctx, added)
+	if len(events) != 1 || events[0].Type != AnthropicStreamEventTypeContentBlockStart {
 		t.Fatalf("added events = %#v", events)
+	}
+	if events[0].ContentBlock == nil || events[0].ContentBlock.Type != AnthropicContentBlockTypeThinking {
+		t.Fatalf("added content block = %#v, want thinking", events[0].ContentBlock)
 	}
 
 	delta := "stream summary"
@@ -226,17 +273,17 @@ func TestToAnthropicResponsesStreamResponseEmitsReasoningSignatureEnvelope(t *te
 			Status: &status,
 		},
 	}
-	events := ToAnthropicResponsesStreamResponse(ctx, done)
-	if len(events) != 2 {
-		t.Fatalf("done events len = %d, want 2: %#v", len(events), events)
+	doneEvents := ToAnthropicResponsesStreamResponse(ctx, done)
+	if len(doneEvents) != 2 {
+		t.Fatalf("done events len = %d, want 2: %#v", len(doneEvents), doneEvents)
 	}
-	if events[0].Type != AnthropicStreamEventTypeContentBlockDelta || events[0].Delta == nil || events[0].Delta.Signature == nil {
-		t.Fatalf("first done event = %#v, want signature delta", events[0])
+	if doneEvents[0].Type != AnthropicStreamEventTypeContentBlockDelta || doneEvents[0].Delta == nil || doneEvents[0].Delta.Signature == nil {
+		t.Fatalf("first done event = %#v, want signature delta", doneEvents[0])
 	}
-	if events[1].Type != AnthropicStreamEventTypeContentBlockStop {
-		t.Fatalf("second done event = %#v, want stop", events[1])
+	if doneEvents[1].Type != AnthropicStreamEventTypeContentBlockStop {
+		t.Fatalf("second done event = %#v, want stop", doneEvents[1])
 	}
-	decoded, ok := decodeBifrostReasoningEnvelope(events[0].Delta.Signature)
+	decoded, ok := decodeBifrostReasoningEnvelope(doneEvents[0].Delta.Signature)
 	if !ok {
 		t.Fatal("expected signature envelope")
 	}
