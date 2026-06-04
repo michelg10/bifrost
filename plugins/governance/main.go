@@ -1181,6 +1181,22 @@ func (p *GovernancePlugin) isMCPToolAllowedByVKWith(vk *configstoreTables.TableV
 	return false
 }
 
+// rememberClientRequestedModel records the client-facing model BEFORE any routing
+// rule rewrites it to a backend deployment, so response integrations can echo the
+// requested model back to the client. Anthropic responses must report the model the
+// client requested for thinking-block continuity: thinking signatures are model-bound,
+// so a response stamped with the routed backend model causes Claude Code to drop
+// reasoning blocks across turns. Set-once — the earliest (pre-rewrite) capture wins.
+func rememberClientRequestedModel(ctx *schemas.BifrostContext, model string) {
+	if ctx == nil || model == "" {
+		return
+	}
+	if existing, ok := ctx.Value(schemas.BifrostContextKeyClientRequestedModel).(string); ok && existing != "" {
+		return
+	}
+	ctx.SetValue(schemas.BifrostContextKeyClientRequestedModel, model)
+}
+
 // PreRequestHook is the per-request governance phase. It runs for both normal body-having
 // requests (route on req.Model) and large-payload streaming requests (route on
 // LargePayloadMetadata.Model from ctx — the body is opaque mid-stream, so routing is
@@ -1211,6 +1227,13 @@ func (p *GovernancePlugin) PreRequestHook(ctx *schemas.BifrostContext, req *sche
 
 	stampGovernanceCtxFromVK(ctx, virtualKey)
 
+	// Capture the client-facing model before routing rules rewrite it (see
+	// rememberClientRequestedModel). For normal body-having requests req carries the
+	// parsed client model; the large-payload branch below captures metadata.Model.
+	if _, clientModel, _ := req.GetRequestFields(); clientModel != "" {
+		rememberClientRequestedModel(ctx, clientModel)
+	}
+
 	// Large-payload mode: the body streams to the provider unparsed, so req.Model is
 	// empty for routes where the model lives in the body (OpenAI/Anthropic chat,
 	// responses, etc.). Route on LargePayloadMetadata.Model — the provider's
@@ -1218,6 +1241,9 @@ func (p *GovernancePlugin) PreRequestHook(ctx *schemas.BifrostContext, req *sche
 	// reads metadata.Model when it rewrites the model field in the body prefix, so
 	// mutating it here is what propagates the routing decision to the upstream call.
 	if metadata, _ := ctx.Value(schemas.BifrostContextKeyLargePayloadMetadata).(*schemas.LargePayloadMetadata); metadata != nil && metadata.Model != "" {
+		// Body wasn't parsed, so the Anthropic conversion never captured the client
+		// model — record it here before routing rewrites metadata.Model.
+		rememberClientRequestedModel(ctx, metadata.Model)
 		newModel, err := p.runPreRequestRouting(ctx, virtualKey, hasRoutingRules, metadata.Model, req.RequestType)
 		if err != nil {
 			return err

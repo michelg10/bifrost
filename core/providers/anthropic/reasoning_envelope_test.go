@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -13,7 +14,9 @@ func TestBifrostReasoningEnvelopeRoundTrip(t *testing.T) {
 	status := "completed"
 	responseID := "resp_123"
 	encrypted := "enc_123"
+	model := "claude-opus-4-8"
 	envelope := bifrostReasoningEnvelope{
+		Model:            &model,
 		ResponseID:       &responseID,
 		ReasoningID:      &reasoningID,
 		Status:           &status,
@@ -28,13 +31,23 @@ func TestBifrostReasoningEnvelopeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeBifrostReasoningEnvelope returned error: %v", err)
 	}
-	if !strings.HasPrefix(encoded, bifrostReasoningEnvelopePrefix) {
-		t.Fatalf("encoded envelope prefix = %q, want %q", encoded, bifrostReasoningEnvelopePrefix)
+	// The signature mimics a native Anthropic signature: prefix-less base64 whose
+	// decoded bytes embed the model. It must NOT carry the legacy "bfrs1." tell.
+	if strings.HasPrefix(encoded, "bfrs1.") {
+		t.Fatalf("encoded envelope should not carry the bfrs1. prefix: %q", encoded)
+	}
+	if raw, derr := base64.StdEncoding.DecodeString(encoded); derr != nil {
+		t.Fatalf("signature is not standard base64: %v", derr)
+	} else if !strings.Contains(string(raw), model) {
+		t.Fatalf("decoded signature does not embed the model %q: %s", model, raw)
 	}
 
 	decoded, ok := decodeBifrostReasoningEnvelope(&encoded)
 	if !ok {
 		t.Fatal("expected envelope to decode")
+	}
+	if decoded.Model == nil || *decoded.Model != model {
+		t.Fatalf("model = %v, want %q", decoded.Model, model)
 	}
 	if decoded.ReasoningID == nil || *decoded.ReasoningID != reasoningID {
 		t.Fatalf("reasoning id = %v, want %q", decoded.ReasoningID, reasoningID)
