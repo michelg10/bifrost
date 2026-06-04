@@ -1536,8 +1536,13 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 			if bifrostResp.Response.ID != nil {
 				streamMessage.ID = *bifrostResp.Response.ID
 			}
-			// Prefer Response.Model, then ResolvedModelUsed, then OriginalModelRequested
-			if bifrostResp.Response != nil && bifrostResp.Response.Model != "" {
+			// Echo the client-requested model (e.g. "claude-opus-4-8") so Anthropic
+			// clients see a self-consistent model identity across the conversation.
+			// Fall back to Response.Model, then ResolvedModelUsed, then
+			// OriginalModelRequested when the client model isn't captured.
+			if clientModel := getClientRequestedModel(ctx); clientModel != "" {
+				streamMessage.Model = clientModel
+			} else if bifrostResp.Response != nil && bifrostResp.Response.Model != "" {
 				streamMessage.Model = bifrostResp.Response.Model
 			} else if bifrostResp.ExtraFields.ResolvedModelUsed != "" {
 				streamMessage.Model = bifrostResp.ExtraFields.ResolvedModelUsed
@@ -1637,6 +1642,9 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 							reasoningEnvelope := streamState.getReasoningEnvelope(*bifrostResp.Item.ID)
 							reasoningEnvelope.ReasoningID = bifrostResp.Item.ID
 							reasoningEnvelope.Status = bifrostResp.Item.Status
+							if clientModel := getClientRequestedModel(ctx); clientModel != "" {
+								reasoningEnvelope.Model = &clientModel
+							}
 							if bifrostResp.Response != nil {
 								reasoningEnvelope.ResponseID = bifrostResp.Response.ID
 							}
@@ -2099,6 +2107,9 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 			}
 			if reasoningEnvelope != nil {
 				reasoningEnvelope.Status = bifrostResp.Item.Status
+				if clientModel := getClientRequestedModel(ctx); clientModel != "" {
+					reasoningEnvelope.Model = &clientModel
+				}
 				if bifrostResp.Response != nil {
 					reasoningEnvelope.ResponseID = bifrostResp.Response.ID
 				}
@@ -2171,10 +2182,23 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 		if alreadyEmitted, ok := ctx.Value(schemas.BifrostContextKeyHasEmittedMessageDelta).(bool); ok && alreadyEmitted {
 			return []*AnthropicStreamEvent{streamResp}
 		}
+		// Default stop reason. The OpenAI Responses API has no top-level stop
+		// reason, so Response.StopReason is nil for that path and we must derive
+		// it: a response whose output contains tool/function calls must report
+		// `tool_use` (mirrors the non-streaming ToAnthropicResponsesResponse and
+		// the Bedrock path), not `end_turn`. Anthropic clients use this to manage
+		// the tool-use turn boundary.
+		// (Ablation 2026-06-04 showed this is NOT required for Claude Code
+		// thinking replay — the model-echo fix alone suffices — but it is kept
+		// for API correctness.)
+		defaultStopReason := AnthropicStopReasonEndTurn
+		if responseOutputHasToolUse(bifrostResp.Response) {
+			defaultStopReason = AnthropicStopReasonToolUse
+		}
 		anthropicContentDeltaEvent := &AnthropicStreamEvent{
 			Type: AnthropicStreamEventTypeMessageDelta,
 			Delta: &AnthropicStreamDelta{
-				StopReason:   schemas.Ptr(AnthropicStopReasonEndTurn),
+				StopReason:   schemas.Ptr(defaultStopReason),
 				StopSequence: schemas.Ptr(""),
 			},
 		}
@@ -2277,6 +2301,11 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 
 // ToBifrostResponsesRequest converts an Anthropic message request to Bifrost format
 func (req *AnthropicMessageRequest) ToBifrostResponsesRequest(ctx *schemas.BifrostContext) *schemas.BifrostResponsesRequest {
+	// Capture the raw client-requested model (e.g. "claude-opus-4-8") before any
+	// alias/deployment resolution, so the response path can echo it back as the
+	// `model` field and embed it in reasoning-envelope signatures.
+	setClientRequestedModel(ctx, req.Model)
+
 	provider, model := schemas.ParseModelString(req.Model, providerUtils.CheckAndSetDefaultProvider(ctx, schemas.Anthropic))
 
 	bifrostReq := &schemas.BifrostResponsesRequest{
@@ -2967,6 +2996,7 @@ func ToAnthropicResponsesResponse(ctx *schemas.BifrostContext, bifrostResp *sche
 	if bifrostResp.Output != nil {
 		anthropicMessages, _ := convertBifrostMessagesToAnthropicMessagesWithOptions(ctx, bifrostResp.Output, false, "", "", bifrostToAnthropicConversionOptions{
 			ReasoningEnvelopeResponseID: bifrostResp.ID,
+			ReasoningEnvelopeModel:      getClientRequestedModel(ctx),
 			EmitReasoningEnvelope:       supportsOpenAIReasoningEnvelope(bifrostResp.ExtraFields.Provider),
 		})
 		// Extract content blocks from the converted messages
@@ -3002,6 +3032,11 @@ func ToAnthropicResponsesResponse(ctx *schemas.BifrostContext, bifrostResp *sche
 	}
 
 	anthropicResp.Model = bifrostResp.Model
+	// Echo the client-requested model (e.g. "claude-opus-4-8") when available, so
+	// Anthropic clients see a self-consistent model identity.
+	if clientModel := getClientRequestedModel(ctx); clientModel != "" {
+		anthropicResp.Model = clientModel
+	}
 
 	if bifrostResp.ServiceTier != nil {
 		if anthropicResp.Usage == nil {
@@ -3048,6 +3083,7 @@ func ConvertAnthropicMessagesToBifrostMessages(ctx *schemas.BifrostContext, anth
 
 type bifrostToAnthropicConversionOptions struct {
 	ReasoningEnvelopeResponseID *string
+	ReasoningEnvelopeModel      string
 	EmitReasoningEnvelope       bool
 }
 
@@ -3321,7 +3357,7 @@ func convertBifrostMessagesToAnthropicMessagesWithOptions(ctx *schemas.BifrostCo
 
 			// Handle reasoning as thinking content
 			if opts.EmitReasoningEnvelope {
-				pendingReasoningContentBlocks = appendBifrostReasoningEnvelopeBlocks(pendingReasoningContentBlocks, &msg, opts.ReasoningEnvelopeResponseID)
+				pendingReasoningContentBlocks = appendBifrostReasoningEnvelopeBlocks(pendingReasoningContentBlocks, &msg, opts.ReasoningEnvelopeResponseID, opts.ReasoningEnvelopeModel)
 			} else {
 				reasoningBlocks := convertBifrostReasoningToAnthropicThinking(&msg)
 				pendingReasoningContentBlocks = append(pendingReasoningContentBlocks, reasoningBlocks...)
@@ -4599,7 +4635,7 @@ func convertAnthropicThinkingEnvelopeToBifrostReasoning(block *AnthropicContentB
 	return msg
 }
 
-func buildBifrostReasoningEnvelope(msg *schemas.ResponsesMessage, responseID *string) (*string, []schemas.ResponsesReasoningSummary) {
+func buildBifrostReasoningEnvelope(msg *schemas.ResponsesMessage, responseID *string, model string) (*string, []schemas.ResponsesReasoningSummary) {
 	if msg == nil || msg.ID == nil || *msg.ID == "" {
 		return nil, nil
 	}
@@ -4607,6 +4643,9 @@ func buildBifrostReasoningEnvelope(msg *schemas.ResponsesMessage, responseID *st
 		ResponseID:  responseID,
 		ReasoningID: msg.ID,
 		Status:      msg.Status,
+	}
+	if model != "" {
+		envelope.Model = &model
 	}
 	if msg.ResponsesReasoning != nil {
 		envelope.Summary = msg.ResponsesReasoning.Summary
@@ -4619,8 +4658,8 @@ func buildBifrostReasoningEnvelope(msg *schemas.ResponsesMessage, responseID *st
 	return &encoded, envelope.Summary
 }
 
-func appendBifrostReasoningEnvelopeBlocks(blocks []AnthropicContentBlock, msg *schemas.ResponsesMessage, responseID *string) []AnthropicContentBlock {
-	envelope, summary := buildBifrostReasoningEnvelope(msg, responseID)
+func appendBifrostReasoningEnvelopeBlocks(blocks []AnthropicContentBlock, msg *schemas.ResponsesMessage, responseID *string, model string) []AnthropicContentBlock {
+	envelope, summary := buildBifrostReasoningEnvelope(msg, responseID, model)
 	if envelope == nil {
 		return blocks
 	}

@@ -437,6 +437,15 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		}
 	}
 
+	// Preserve the client-facing model BEFORE any routing rule rewrites it, so
+	// downstream integrations can echo it back to the client. Anthropic responses
+	// must report the model the client requested for thinking-block continuity:
+	// thinking signatures are model-bound, so a response stamped with the routed
+	// backend model causes Claude Code to drop reasoning blocks across turns.
+	if m, ok := payload["model"].(string); ok && m != "" {
+		ctx.SetValue(schemas.BifrostContextKeyClientRequestedModel, m)
+	}
+
 	//1. Apply routing rules only if we have rules or matched decision
 	var routingDecision *RoutingDecision
 	if hasRoutingRules {
@@ -503,6 +512,10 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 	if metadata == nil || metadata.Model == "" {
 		return nil, nil
 	}
+
+	// Preserve the client-facing model before routing rewrites it (see
+	// HTTPTransportPreHook for the rationale).
+	ctx.SetValue(schemas.BifrostContextKeyClientRequestedModel, metadata.Model)
 
 	// Build synthetic payload from metadata — only the model field is needed
 	payload := map[string]any{
@@ -613,6 +626,9 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 	if modelParam == "" {
 		return nil, nil
 	}
+	// Preserve the client-facing model before routing rewrites it (see
+	// HTTPTransportPreHook for the rationale).
+	ctx.SetValue(schemas.BifrostContextKeyClientRequestedModel, modelParam)
 
 	payload := map[string]any{
 		"model": modelParam,
