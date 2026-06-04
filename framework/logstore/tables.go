@@ -17,13 +17,52 @@ import (
 // store it. Stripping the escape from the marshaled JSON keeps subsequent
 // TEXT->jsonb casts in list queries safe. The replacement is case-insensitive
 // since JSON allows \u0000 or \U0000.
+//
+// LOCAL FORK PATCH (commit log has the full story): the previous
+// implementation used naive strings.ReplaceAll to strip the JSON null
+// escape. That corrupted JSON whenever the marshaled payload contained
+// a literal backslash followed by "u0000" -- sonic.Marshal encodes that
+// as an escaped-backslash plus the four zeros. ReplaceAll matched the
+// 6-byte target starting at the second backslash and left a single
+// trailing backslash followed by the next non-escape character. The
+// resulting invalid JSON then broke SQLite's json_array_length() in
+// listSelectColumns(), 500'ing every /api/logs request as soon as any
+// stored row contained user text with a literal backslash.
+//
+// The corrected implementation walks runs of backslashes and only
+// strips the null escape when it is preceded by an EVEN number of
+// backslashes (i.e. the leading backslash genuinely opens a JSON
+// escape rather than being itself escaped). Case-insensitive uU
+// mirrors the pre-existing behavior even though strict JSON only
+// emits lowercase \u.
 func sanitizeJSONForJSONB(s string) string {
 	if !strings.Contains(s, `\u`) && !strings.Contains(s, `\U`) {
 		return s
 	}
-	s = strings.ReplaceAll(s, `\u0000`, "")
-	s = strings.ReplaceAll(s, `\U0000`, "")
-	return s
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && s[j] == '\\' {
+			j++
+		}
+		runLen := j - i
+		if runLen%2 == 1 && j+4 < len(s) && (s[j] == 'u' || s[j] == 'U') &&
+			s[j+1] == '0' && s[j+2] == '0' && s[j+3] == '0' && s[j+4] == '0' {
+			b.WriteString(s[i : i+runLen-1])
+			i = j + 5
+		} else {
+			b.WriteString(s[i:j])
+			i = j
+		}
+	}
+	return b.String()
 }
 
 type SortBy string
