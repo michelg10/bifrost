@@ -356,6 +356,70 @@ func TestToOpenAIResponsesRequest_PreservesReplayedReasoningItem(t *testing.T) {
 	}
 }
 
+func TestToOpenAIResponsesRequest_StripsEncryptedContentIncludeForNonReasoningModels(t *testing.T) {
+	tests := []struct {
+		name        string
+		model       string
+		include     []string
+		wantInclude []string
+	}{
+		{
+			name:        "non-reasoning model strips encrypted_content include",
+			model:       "gpt-4.1",
+			include:     []string{"reasoning.encrypted_content"},
+			wantInclude: []string{},
+		},
+		{
+			name:        "non-reasoning model keeps other includes",
+			model:       "gpt-4.1",
+			include:     []string{"web_search_call.action.sources", "reasoning.encrypted_content"},
+			wantInclude: []string{"web_search_call.action.sources"},
+		},
+		{
+			name:        "reasoning model keeps encrypted_content include",
+			model:       "gpt-5.5-cc",
+			include:     []string{"reasoning.encrypted_content"},
+			wantInclude: []string{"reasoning.encrypted_content"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bifrostReq := &schemas.BifrostResponsesRequest{
+				Provider: schemas.Azure,
+				Model:    tt.model,
+				Input: []schemas.ResponsesMessage{{
+					Role: schemas.Ptr(schemas.ResponsesInputMessageRoleUser),
+					Content: &schemas.ResponsesMessageContent{
+						ContentStr: schemas.Ptr("hello"),
+					},
+				}},
+				Params: &schemas.ResponsesParameters{
+					Include: tt.include,
+				},
+			}
+
+			result := ToOpenAIResponsesRequest(bifrostReq)
+			if result == nil {
+				t.Fatal("ToOpenAIResponsesRequest returned nil")
+			}
+			got := result.ResponsesParameters.Include
+			if len(got) != len(tt.wantInclude) {
+				t.Fatalf("include = %#v, want %#v", got, tt.wantInclude)
+			}
+			for i := range got {
+				if got[i] != tt.wantInclude[i] {
+					t.Fatalf("include = %#v, want %#v", got, tt.wantInclude)
+				}
+			}
+			// The original params must not be mutated.
+			if len(bifrostReq.Params.Include) != len(tt.include) {
+				t.Fatalf("original include mutated: %#v", bifrostReq.Params.Include)
+			}
+		})
+	}
+}
+
 func TestToOpenAIResponsesRequest_NormalizesReasoningEffort(t *testing.T) {
 	tests := []struct {
 		name     string

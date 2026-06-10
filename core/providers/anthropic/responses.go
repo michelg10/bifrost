@@ -2412,6 +2412,24 @@ func (req *AnthropicMessageRequest) ToBifrostResponsesRequest(ctx *schemas.Bifro
 	if include, ok := schemas.SafeExtractStringSlice(req.ExtraParams["include"]); ok {
 		params.Include = include
 	}
+	if store, ok := schemas.SafeExtractBool(req.ExtraParams["store"]); ok {
+		params.Store = schemas.Ptr(store)
+	}
+	// Reasoning continuity belt-and-suspenders for OpenAI-family Responses
+	// backends: carry reasoning by value (encrypted_content round-tripped through
+	// thinking signatures) AND pin server-side storage so bare rs_ id references
+	// keep working. Azure's response store is eventually consistent — id-only
+	// references can 400 with "Item not found" ~1-2s after creation.
+	// Applied regardless of the requested effort: some OpenAI models are
+	// reasoning-only ("none" is rejected, e.g. -codex/-pro variants), so a
+	// thinking-off request can still produce reasoning items that need replay.
+	// ToOpenAIResponsesRequest strips the include for models that cannot return
+	// encrypted content (hard 400 otherwise); providers whose request builders
+	// don't read Include/Store ignore both fields.
+	appendUniqueInclude(params, "reasoning.encrypted_content")
+	if params.Store == nil {
+		params.Store = schemas.Ptr(true)
+	}
 	if req.ServiceTier != nil {
 		mapped := MapAnthropicRequestServiceTierToBifrost(*req.ServiceTier)
 		params.ServiceTier = &mapped

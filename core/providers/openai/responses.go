@@ -217,6 +217,19 @@ func ToOpenAIResponsesRequest(bifrostReq *schemas.BifrostResponsesRequest) *Open
 		// Drop user field if it exceeds OpenAI's 64 character limit
 		req.ResponsesParameters.User = SanitizeUserField(req.ResponsesParameters.User)
 
+		// Non-reasoning models hard-400 on include reasoning.encrypted_content
+		// ("Encrypted content is not supported with this model"), so the include
+		// is only forwarded to models that can produce encrypted reasoning.
+		if !isOpenAIReasoningModel(bifrostReq.Model) && len(req.ResponsesParameters.Include) > 0 {
+			filtered := make([]string, 0, len(req.ResponsesParameters.Include))
+			for _, include := range req.ResponsesParameters.Include {
+				if include != "reasoning.encrypted_content" {
+					filtered = append(filtered, include)
+				}
+			}
+			req.ResponsesParameters.Include = filtered
+		}
+
 		// Handle reasoning parameter: OpenAI uses effort-based reasoning
 		// Priority: effort (native) > max_tokens (estimated)
 		if req.ResponsesParameters.Reasoning != nil {

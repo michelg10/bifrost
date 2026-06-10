@@ -114,7 +114,7 @@ func TestAnthropicThinkingEnvelopeRestoresReasoningMessage(t *testing.T) {
 	}
 }
 
-func TestToBifrostResponsesRequestDoesNotAddEncryptedReasoningIncludeByDefault(t *testing.T) {
+func TestToBifrostResponsesRequestReasoningAddsEncryptedContentIncludeAndStore(t *testing.T) {
 	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
 	defer cancel()
 
@@ -134,8 +134,122 @@ func TestToBifrostResponsesRequestDoesNotAddEncryptedReasoningIncludeByDefault(t
 	if got == nil || got.Params == nil {
 		t.Fatal("expected params")
 	}
-	if len(got.Params.Include) != 0 {
-		t.Fatalf("include = %#v, want empty by default", got.Params.Include)
+	found := false
+	for _, include := range got.Params.Include {
+		if include == "reasoning.encrypted_content" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("include = %#v, want reasoning.encrypted_content", got.Params.Include)
+	}
+	if got.Params.Store == nil || !*got.Params.Store {
+		t.Fatalf("store = %#v, want explicit true", got.Params.Store)
+	}
+}
+
+func TestToBifrostResponsesRequestNoReasoningStillAddsIncludeAndStore(t *testing.T) {
+	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
+	defer cancel()
+
+	// Some OpenAI models are reasoning-only ("none" is rejected, e.g. -codex),
+	// so the include + store belt-and-suspenders applies even when thinking is
+	// off; ToOpenAIResponsesRequest strips the include for models that cannot
+	// return encrypted content.
+	for name, thinking := range map[string]*AnthropicThinking{
+		"thinking absent":   nil,
+		"thinking disabled": {Type: "disabled"},
+	} {
+		req := &AnthropicMessageRequest{
+			Model:     "azure/gpt-5.5-cc",
+			MaxTokens: 1024,
+			Thinking:  thinking,
+			Messages: []AnthropicMessage{{
+				Role: AnthropicMessageRoleUser,
+				Content: AnthropicContent{
+					ContentStr: schemas.Ptr("hello"),
+				},
+			}},
+		}
+
+		got := req.ToBifrostResponsesRequest(ctx)
+		if got == nil || got.Params == nil {
+			t.Fatalf("%s: expected params", name)
+		}
+		found := false
+		for _, include := range got.Params.Include {
+			if include == "reasoning.encrypted_content" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s: include = %#v, want reasoning.encrypted_content", name, got.Params.Include)
+		}
+		if got.Params.Store == nil || !*got.Params.Store {
+			t.Fatalf("%s: store = %#v, want explicit true", name, got.Params.Store)
+		}
+	}
+}
+
+func TestToBifrostResponsesRequestClientIncludeNotDuplicated(t *testing.T) {
+	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
+	defer cancel()
+
+	req := &AnthropicMessageRequest{
+		Model:     "azure/gpt-5.5-cc",
+		MaxTokens: 1024,
+		Thinking:  &AnthropicThinking{Type: "enabled"},
+		ExtraParams: map[string]interface{}{
+			"include": []string{"reasoning.encrypted_content"},
+		},
+		Messages: []AnthropicMessage{{
+			Role: AnthropicMessageRoleUser,
+			Content: AnthropicContent{
+				ContentStr: schemas.Ptr("hello"),
+			},
+		}},
+	}
+
+	got := req.ToBifrostResponsesRequest(ctx)
+	if got == nil || got.Params == nil {
+		t.Fatal("expected params")
+	}
+	count := 0
+	for _, include := range got.Params.Include {
+		if include == "reasoning.encrypted_content" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("include = %#v, want exactly one reasoning.encrypted_content", got.Params.Include)
+	}
+}
+
+func TestToBifrostResponsesRequestClientStoreOverrideWins(t *testing.T) {
+	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
+	defer cancel()
+
+	req := &AnthropicMessageRequest{
+		Model:     "azure/gpt-5.5-cc",
+		MaxTokens: 1024,
+		Thinking:  &AnthropicThinking{Type: "enabled"},
+		ExtraParams: map[string]interface{}{
+			"store": false,
+		},
+		Messages: []AnthropicMessage{{
+			Role: AnthropicMessageRoleUser,
+			Content: AnthropicContent{
+				ContentStr: schemas.Ptr("hello"),
+			},
+		}},
+	}
+
+	got := req.ToBifrostResponsesRequest(ctx)
+	if got == nil || got.Params == nil {
+		t.Fatal("expected params")
+	}
+	if got.Params.Store == nil || *got.Params.Store {
+		t.Fatalf("store = %#v, want explicit false from client override", got.Params.Store)
 	}
 }
 
