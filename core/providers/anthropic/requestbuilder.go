@@ -25,8 +25,8 @@ type AnthropicRequestBuildConfig struct {
 
 	IsStreaming bool
 
-	// IsCountTokens enables token-counting mode: strips max_tokens and
-	// temperature from the body and keeps (or sets) the model field.
+	// IsCountTokens enables token-counting mode: strips response-output
+	// controls from the body and keeps (or sets) the model field.
 	IsCountTokens bool
 
 	// ExcludeFields lists JSON top-level keys to remove from the final body
@@ -160,14 +160,12 @@ func BuildAnthropicResponsesRequestBody(ctx *schemas.BifrostContext, request *sc
 		jsonBody = request.GetRawRequestBody()
 
 		if cfg.IsCountTokens {
-			// Token-counting mode: strip max_tokens / temperature and set model.
-			jsonBody, err = providerUtils.DeleteJSONField(jsonBody, "max_tokens")
-			if err != nil {
-				return nil, newErr(schemas.ErrProviderRequestMarshal, err, jsonBody)
-			}
-			jsonBody, err = providerUtils.DeleteJSONField(jsonBody, "temperature")
-			if err != nil {
-				return nil, newErr(schemas.ErrProviderRequestMarshal, err, jsonBody)
+			// Token-counting mode: strip response-output controls and set model.
+			for _, field := range []string{"max_tokens", "temperature", "include", "store"} {
+				jsonBody, err = providerUtils.DeleteJSONField(jsonBody, field)
+				if err != nil {
+					return nil, newErr(schemas.ErrProviderRequestMarshal, err, jsonBody)
+				}
 			}
 			jsonBody, err = providerUtils.SetJSONField(jsonBody, "model", cfg.Model)
 			if err != nil {
@@ -338,13 +336,11 @@ func BuildAnthropicResponsesRequestBody(ctx *schemas.BifrostContext, request *sc
 		}
 
 		if cfg.IsCountTokens {
-			jsonBody, err = providerUtils.DeleteJSONField(jsonBody, "max_tokens")
-			if err != nil {
-				return nil, newErr(schemas.ErrProviderRequestMarshal, err, jsonBody)
-			}
-			jsonBody, err = providerUtils.DeleteJSONField(jsonBody, "temperature")
-			if err != nil {
-				return nil, newErr(schemas.ErrProviderRequestMarshal, err, jsonBody)
+			for _, field := range []string{"max_tokens", "temperature", "include", "store"} {
+				jsonBody, err = providerUtils.DeleteJSONField(jsonBody, field)
+				if err != nil {
+					return nil, newErr(schemas.ErrProviderRequestMarshal, err, jsonBody)
+				}
 			}
 		} else if defaults.DeleteModelField {
 			// Vertex/Bedrock: model is in the URL, remove it from the body.

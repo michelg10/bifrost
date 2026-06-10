@@ -2734,7 +2734,7 @@ func (provider *AnthropicProvider) CountTokens(ctx *schemas.BifrostContext, key 
 	jsonBody, err := BuildAnthropicResponsesRequestBody(ctx, request, AnthropicRequestBuildConfig{
 		Provider:                  schemas.Anthropic,
 		IsStreaming:               false,
-		ExcludeFields:             []string{"max_tokens", "temperature"},
+		ExcludeFields:             []string{"max_tokens", "temperature", "include", "store"},
 		ShouldSendBackRawRequest:  provider.sendBackRawRequest,
 		ShouldSendBackRawResponse: provider.sendBackRawResponse,
 	})

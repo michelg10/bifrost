@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic"
+	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
@@ -335,7 +336,7 @@ func TestToOpenAIResponsesRequest_PreservesReplayedReasoningItem(t *testing.T) {
 		},
 	}
 
-	result := ToOpenAIResponsesRequest(bifrostReq)
+	result := ToOpenAIResponsesRequest(nil, bifrostReq)
 	if result == nil {
 		t.Fatal("ToOpenAIResponsesRequest returned nil")
 	}
@@ -400,7 +401,7 @@ func TestToOpenAIResponsesRequest_StripsEncryptedContentIncludeForNonReasoningMo
 				},
 			}
 
-			result := ToOpenAIResponsesRequest(bifrostReq)
+			result := ToOpenAIResponsesRequest(nil, bifrostReq)
 			if result == nil {
 				t.Fatal("ToOpenAIResponsesRequest returned nil")
 			}
@@ -418,6 +419,24 @@ func TestToOpenAIResponsesRequest_StripsEncryptedContentIncludeForNonReasoningMo
 				t.Fatalf("original include mutated: %#v", bifrostReq.Params.Include)
 			}
 		})
+	}
+}
+
+func TestStripOpenAICountTokensUnsupportedFields(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","include":["reasoning.encrypted_content"],"store":true,"input":[{"role":"user","content":"hello"}]}`)
+
+	got, err := stripOpenAICountTokensUnsupportedFields(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if providerUtils.JSONFieldExists(got, "include") {
+		t.Fatalf("include should be stripped, got %s", string(got))
+	}
+	if providerUtils.JSONFieldExists(got, "store") {
+		t.Fatalf("store should be stripped, got %s", string(got))
+	}
+	if !providerUtils.JSONFieldExists(got, "model") || !providerUtils.JSONFieldExists(got, "input") {
+		t.Fatalf("model/input should be preserved, got %s", string(got))
 	}
 }
 
