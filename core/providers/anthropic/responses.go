@@ -2590,7 +2590,10 @@ func ToAnthropicResponsesStreamResponse(ctx *schemas.BifrostContext, bifrostResp
 							} else {
 								contentBlock.Type = AnthropicContentBlockTypeToolUse
 								if bifrostResp.Item.ResponsesToolMessage != nil {
-									contentBlock.ID = providerUtils.SanitizeAnthropicToolUseIDPtr(bifrostResp.Item.ResponsesToolMessage.CallID)
+									// Envelope-encode first (no-op unless the item carries an OpenAI fc_ id),
+									// then sanitize: the envelope suffix is charset-safe, so sanitization only
+									// rewrites ids whose raw call_id already violates Anthropic's pattern.
+									contentBlock.ID = providerUtils.SanitizeAnthropicToolUseIDPtr(encodeFunctionCallToolUseID(bifrostResp.Item.ResponsesToolMessage.CallID, bifrostResp.Item.ID))
 									contentBlock.Name = bifrostResp.Item.ResponsesToolMessage.Name
 									// Always start with empty input for streaming compatibility
 									contentBlock.Input = json.RawMessage("{}")
@@ -4072,6 +4075,7 @@ func ToAnthropicResponsesResponse(ctx *schemas.BifrostContext, bifrostResp *sche
 			ReasoningEnvelopeResponseID: bifrostResp.ID,
 			ReasoningEnvelopeModel:      getClientRequestedModel(ctx),
 			EmitReasoningEnvelope:       supportsOpenAIReasoningEnvelope(bifrostResp.ExtraFields.Provider),
+			EncodeFunctionCallToolUseID: true,
 		})
 		// Extract content blocks from the converted messages
 		for _, msg := range anthropicMessages {
@@ -4189,6 +4193,7 @@ type bifrostToAnthropicConversionOptions struct {
 	ReasoningEnvelopeResponseID *string
 	ReasoningEnvelopeModel      string
 	EmitReasoningEnvelope       bool
+	EncodeFunctionCallToolUseID bool
 }
 
 // ConvertBifrostMessagesToAnthropicMessages converts an array of Bifrost ResponsesMessage to Anthropic message format
@@ -4491,6 +4496,12 @@ func convertBifrostMessagesToAnthropicMessagesWithOptions(ctx *schemas.BifrostCo
 
 			toolUseBlock := convertBifrostFunctionCallToAnthropicToolUse(ctx, &msg)
 			if toolUseBlock != nil {
+				if opts.EncodeFunctionCallToolUseID && msg.ResponsesToolMessage != nil && msg.ResponsesToolMessage.CallID != nil {
+					// Envelope-encode first (no-op unless the item carries an OpenAI fc_ id),
+					// then sanitize: the envelope suffix is charset-safe, so sanitization only
+					// rewrites ids whose raw call_id already violates Anthropic's pattern.
+					toolUseBlock.ID = providerUtils.SanitizeAnthropicToolUseIDPtr(encodeFunctionCallToolUseID(msg.ResponsesToolMessage.CallID, msg.ID))
+				}
 				// If there was a previous assistant message (text only) that was just added,
 				// and we have no pending tool calls yet, we should merge the tool call into it.
 				// This handles the case where an assistant text message precedes tool calls.
@@ -5116,12 +5127,13 @@ func convertAnthropicContentBlocksToResponsesMessagesGrouped(contentBlocks []Ant
 			// Convert tool result to function call output message
 			if block.ToolUseID != nil {
 				if block.Content != nil {
+					callID, _, _ := decodeFunctionCallToolUseID(block.ToolUseID)
 					bifrostMsg := schemas.ResponsesMessage{
 						Type:         schemas.Ptr(schemas.ResponsesMessageTypeFunctionCallOutput),
 						Status:       schemas.Ptr("completed"),
 						CacheControl: block.CacheControl,
 						ResponsesToolMessage: &schemas.ResponsesToolMessage{
-							CallID: block.ToolUseID,
+							CallID: callID,
 						},
 					}
 					// Initialize the nested struct before any writes
@@ -5208,12 +5220,13 @@ func convertAnthropicContentBlocksToResponsesMessagesGrouped(contentBlocks []Ant
 	// Emit any accumulated tool_use blocks as function_calls
 	if len(pendingToolUseBlocks) > 0 {
 		for _, toolBlock := range pendingToolUseBlocks {
+			callID, functionCallItemID, _ := decodeFunctionCallToolUseID(toolBlock.ID)
 			bifrostMsg := schemas.ResponsesMessage{
 				Type:         schemas.Ptr(schemas.ResponsesMessageTypeFunctionCall),
 				Status:       schemas.Ptr("completed"),
 				CacheControl: toolBlock.CacheControl,
 				ResponsesToolMessage: &schemas.ResponsesToolMessage{
-					CallID: toolBlock.ID,
+					CallID: callID,
 					Name:   toolBlock.Name,
 				},
 			}
@@ -5258,6 +5271,10 @@ func convertAnthropicContentBlocksToResponsesMessagesGrouped(contentBlocks []Ant
 				if len(toolBlock.Input) > 0 {
 					bifrostMsg.ResponsesToolMessage.Arguments = schemas.Ptr(string(toolBlock.Input))
 				}
+			}
+
+			if isOutputMessage && bifrostMsg.Type != nil && *bifrostMsg.Type == schemas.ResponsesMessageTypeFunctionCall && functionCallItemID != nil {
+				bifrostMsg.ID = functionCallItemID
 			}
 
 			bifrostMessages = append(bifrostMessages, bifrostMsg)
@@ -5461,12 +5478,13 @@ func convertAnthropicContentBlocksToResponsesMessages(ctx *schemas.BifrostContex
 			} else {
 				// Convert tool use to function call message
 				if block.ID != nil && block.Name != nil {
+					callID, functionCallItemID, _ := decodeFunctionCallToolUseID(block.ID)
 					bifrostMsg := schemas.ResponsesMessage{
 						Type:         schemas.Ptr(schemas.ResponsesMessageTypeFunctionCall),
 						Status:       schemas.Ptr("completed"),
 						CacheControl: block.CacheControl,
 						ResponsesToolMessage: &schemas.ResponsesToolMessage{
-							CallID: block.ID,
+							CallID: callID,
 							Name:   block.Name,
 						},
 					}
@@ -5487,6 +5505,9 @@ func convertAnthropicContentBlocksToResponsesMessages(ctx *schemas.BifrostContex
 					} else if len(block.Input) > 0 {
 						bifrostMsg.ResponsesToolMessage.Arguments = schemas.Ptr(string(block.Input))
 					}
+					if isOutputMessage && bifrostMsg.Type != nil && *bifrostMsg.Type == schemas.ResponsesMessageTypeFunctionCall && functionCallItemID != nil {
+						bifrostMsg.ID = functionCallItemID
+					}
 					bifrostMessages = append(bifrostMessages, bifrostMsg)
 				}
 			}
@@ -5494,12 +5515,13 @@ func convertAnthropicContentBlocksToResponsesMessages(ctx *schemas.BifrostContex
 			// Convert tool result to function call output message
 			if block.ToolUseID != nil {
 				if block.Content != nil {
+					callID, _, _ := decodeFunctionCallToolUseID(block.ToolUseID)
 					bifrostMsg := schemas.ResponsesMessage{
 						Type:         schemas.Ptr(schemas.ResponsesMessageTypeFunctionCallOutput),
 						Status:       schemas.Ptr("completed"),
 						CacheControl: block.CacheControl,
 						ResponsesToolMessage: &schemas.ResponsesToolMessage{
-							CallID: block.ToolUseID,
+							CallID: callID,
 						},
 					}
 					// Initialize the nested struct before any writes
