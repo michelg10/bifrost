@@ -65,3 +65,21 @@ func TestOpenAICountTokensFallbackModel(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeCountTokensRequestStripsResponseOutputControls(t *testing.T) {
+	req := &schemas.BifrostResponsesRequest{
+		Params: &schemas.ResponsesParameters{
+			Include: []string{"reasoning.encrypted_content"},
+			Store:   schemas.Ptr(true),
+		},
+	}
+
+	sanitizeCountTokensRequest(req)
+
+	if len(req.Params.Include) != 0 {
+		t.Fatalf("include = %#v, want stripped", req.Params.Include)
+	}
+	if req.Params.Store != nil {
+		t.Fatalf("store = %#v, want stripped", req.Params.Store)
+	}
+}

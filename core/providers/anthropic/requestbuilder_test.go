@@ -336,7 +336,7 @@ func TestBuildAnthropicResponsesRequestBody_CountTokensMode(t *testing.T) {
 		request := &schemas.BifrostResponsesRequest{
 			Provider:       schemas.Vertex,
 			Model:          "claude-sonnet-4-5",
-			RawRequestBody: []byte(`{"model":"claude-sonnet-4-5","max_tokens":1024,"temperature":0.7,"messages":[{"role":"user","content":"hello"}]}`),
+			RawRequestBody: []byte(`{"model":"claude-sonnet-4-5","max_tokens":1024,"temperature":0.7,"include":["reasoning.encrypted_content"],"store":true,"messages":[{"role":"user","content":"hello"}]}`),
 		}
 
 		result, err := BuildAnthropicResponsesRequestBody(ctx, request, AnthropicRequestBuildConfig{
@@ -353,6 +353,12 @@ func TestBuildAnthropicResponsesRequestBody_CountTokensMode(t *testing.T) {
 		}
 		if providerUtils.JSONFieldExists(result, "temperature") {
 			t.Error("expected temperature to be stripped in count-tokens mode")
+		}
+		if providerUtils.JSONFieldExists(result, "include") {
+			t.Error("expected include to be stripped in count-tokens mode")
+		}
+		if providerUtils.JSONFieldExists(result, "store") {
+			t.Error("expected store to be stripped in count-tokens mode")
 		}
 		if !providerUtils.JSONFieldExists(result, "model") {
 			t.Error("expected model to be retained in count-tokens mode")

@@ -191,6 +191,35 @@ func TestToBifrostResponsesRequestNoReasoningStillAddsIncludeAndStore(t *testing
 	}
 }
 
+func TestToBifrostResponsesRequestCountTokensSkipsEncryptedContentIncludeAndStore(t *testing.T) {
+	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
+	defer cancel()
+	ctx.SetValue(schemas.BifrostContextKeyHTTPRequestType, schemas.CountTokensRequest)
+
+	req := &AnthropicMessageRequest{
+		Model:     "azure/gpt-5.5-cc",
+		MaxTokens: 1024,
+		Thinking:  &AnthropicThinking{Type: "enabled"},
+		Messages: []AnthropicMessage{{
+			Role: AnthropicMessageRoleUser,
+			Content: AnthropicContent{
+				ContentStr: schemas.Ptr("hello"),
+			},
+		}},
+	}
+
+	got := req.ToBifrostResponsesRequest(ctx)
+	if got == nil || got.Params == nil {
+		t.Fatal("expected params")
+	}
+	if len(got.Params.Include) != 0 {
+		t.Fatalf("include = %#v, want empty for count_tokens", got.Params.Include)
+	}
+	if got.Params.Store != nil {
+		t.Fatalf("store = %#v, want unset for count_tokens", got.Params.Store)
+	}
+}
+
 func TestToBifrostResponsesRequestClientIncludeNotDuplicated(t *testing.T) {
 	ctx, cancel := schemas.NewBifrostContextWithCancel(context.Background())
 	defer cancel()

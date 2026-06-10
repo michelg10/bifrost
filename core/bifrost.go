@@ -927,6 +927,19 @@ func openAICountTokensFallbackModel(model string) string {
 	return strings.TrimSuffix(model, "-cc")
 }
 
+func sanitizeCountTokensRequest(req *schemas.BifrostResponsesRequest) {
+	if req == nil || req.Params == nil {
+		return
+	}
+
+	// Response-output controls are invalid on token-counting endpoints. In
+	// particular, Anthropic SDK count_tokens requests share the Responses
+	// request struct after conversion, so fields auto-added for generation
+	// (reasoning.encrypted_content include / store:true) must not leak here.
+	req.Params.Include = nil
+	req.Params.Store = nil
+}
+
 // CountTokensRequest sends a count tokens request to the specified provider.
 func (bifrost *Bifrost) CountTokensRequest(ctx *schemas.BifrostContext, req *schemas.BifrostResponsesRequest) (*schemas.BifrostCountTokensResponse, *schemas.BifrostError) {
 	if req == nil {
@@ -955,6 +968,7 @@ func (bifrost *Bifrost) CountTokensRequest(ctx *schemas.BifrostContext, req *sch
 		}
 	}
 
+	sanitizeCountTokensRequest(req)
 	addOpenAICountTokensFallbackForAzure(req)
 
 	bifrostReq := bifrost.getBifrostRequest()

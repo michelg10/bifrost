@@ -4184,6 +4184,17 @@ func HandleOpenAICompactionRequest(
 	return response, nil
 }
 
+func stripOpenAICountTokensUnsupportedFields(jsonData []byte) ([]byte, error) {
+	var err error
+	for _, field := range []string{"include", "store"} {
+		jsonData, err = providerUtils.DeleteJSONField(jsonData, field)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return jsonData, nil
+}
+
 // HandleOpenAICountTokensRequest handles a count tokens request to OpenAI's API.
 func HandleOpenAICountTokensRequest(
 	ctx *schemas.BifrostContext,
@@ -4247,6 +4258,10 @@ func HandleOpenAICountTokensRequest(
 		})
 	if bifrostErr != nil {
 		return nil, bifrostErr
+	}
+	jsonData, stripErr := stripOpenAICountTokensUnsupportedFields(jsonData)
+	if stripErr != nil {
+		return nil, providerUtils.NewBifrostOperationError(schemas.ErrProviderRequestMarshal, stripErr)
 	}
 
 	req.SetBody(jsonData)

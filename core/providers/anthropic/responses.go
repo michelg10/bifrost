@@ -2423,12 +2423,20 @@ func (req *AnthropicMessageRequest) ToBifrostResponsesRequest(ctx *schemas.Bifro
 	// Applied regardless of the requested effort: some OpenAI models are
 	// reasoning-only ("none" is rejected, e.g. -codex/-pro variants), so a
 	// thinking-off request can still produce reasoning items that need replay.
+	// Count-token endpoints cannot return encrypted reasoning and reject include;
 	// ToOpenAIResponsesRequest strips the include for models that cannot return
 	// encrypted content (hard 400 otherwise); providers whose request builders
 	// don't read Include/Store ignore both fields.
-	appendUniqueInclude(params, "reasoning.encrypted_content")
-	if params.Store == nil {
-		params.Store = schemas.Ptr(true)
+	isCountTokensRequest := false
+	if ctx != nil {
+		requestType, _ := ctx.Value(schemas.BifrostContextKeyHTTPRequestType).(schemas.RequestType)
+		isCountTokensRequest = requestType == schemas.CountTokensRequest
+	}
+	if !isCountTokensRequest {
+		appendUniqueInclude(params, "reasoning.encrypted_content")
+		if params.Store == nil {
+			params.Store = schemas.Ptr(true)
+		}
 	}
 	if req.ServiceTier != nil {
 		mapped := MapAnthropicRequestServiceTierToBifrost(*req.ServiceTier)

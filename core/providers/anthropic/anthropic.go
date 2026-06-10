@@ -2438,7 +2438,7 @@ func (provider *AnthropicProvider) CountTokens(ctx *schemas.BifrostContext, key 
 	if err := providerUtils.CheckOperationAllowed(schemas.Anthropic, provider.customProviderConfig, schemas.CountTokensRequest); err != nil {
 		return nil, err
 	}
-	jsonBody, err := getRequestBodyForResponses(ctx, request, false, []string{"max_tokens", "temperature"}, provider.sendBackRawRequest, provider.sendBackRawResponse)
+	jsonBody, err := getRequestBodyForResponses(ctx, request, false, []string{"max_tokens", "temperature", "include", "store"}, provider.sendBackRawRequest, provider.sendBackRawResponse)
 	if err != nil {
 		return nil, err
 	}
